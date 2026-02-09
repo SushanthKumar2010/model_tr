@@ -44,14 +44,14 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def root():
     return {"status": "Backend running"}
 
-#@app.post("/api/ask")
-#def ask_question(payload: dict):
- #   board = (payload.get("board") or "ICSE").strip().upper()
-  #  class_level = (payload.get("class_level") or "10").strip()
-   # subject = (payload.get("subject") or "General").strip()
-    #chapter = (payload.get("chapter") or "General").strip()
-    #question = (payload.get("question") or "").strip()
-    #model_choice = (payload.get("model") or "t1").lower()
+@app.post("/api/ask")
+def ask_question(payload: dict):
+    board = (payload.get("board") or "ICSE").strip().upper()
+    class_level = (payload.get("class_level") or "10").strip()
+    subject = (payload.get("subject") or "General").strip()
+    chapter = (payload.get("chapter") or "General").strip()
+    question = (payload.get("question") or "").strip()
+    model_choice = (payload.get("model") or "t1").lower()
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
@@ -59,67 +59,16 @@ def root():
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
 
-# ======================
-# MODEL SELECTION (🔥 FIXED)
-# ======================
-from datetime import datetime
-from fastapi import HTTPException
-
-@app.post("/api/ask")
-def ask_question(payload: dict):
-    board=(payload.get("board") or "ICSE").strip().upper()
-    class_level=(payload.get("class_level") or "10").strip()
-    subject=(payload.get("subject") or "General").strip()
-    chapter=(payload.get("chapter") or "General").strip()
-    question=(payload.get("question") or "").strip()
-    model_choice=(payload.get("model_choice") or "t1").lower()
-    if board not in ALLOWED_BOARDS:
-        raise HTTPException(status_code=400,detail="Invalid board")
-    if not question:
-        raise HTTPException(status_code=400,detail="Question is required")
-    if model_choice=="t2":
-        model_name="gemini-3-pro-preview"
+    # ======================
+    # MODEL SELECTION (🔥 FIXED)
+    # ======================
+    if model_choice == "t2":
+        model_name = "gemini-3-pro-preview"
     else:
-        model_name="gemini-2.5-flash-lite-preview"
-    today=datetime.now().strftime("%d %B %Y")
-    prompt=f"""You are an expert {board} Class {class_level} teacher.
-Today’s date is {today}.
-Board:{board}
-Subject:{subject}
-Chapter:{chapter}
-Question:
-\"\"\"{question}\"\"\""""
-    try:
-        response=client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        answer=(response.text or "").strip()
-        if not answer:
-            answer="I could not generate an answer."
-    except Exception as e:
-        error_text=str(e)
-        if "503" in error_text or "UNAVAILABLE" in error_text:
-            raise HTTPException(
-                status_code=503,
-                detail="AI model server is busy right now. Try again by refreshing the page"
-            )
-        raise HTTPException(
-            status_code=500,
-            detail="Something went wrong. Please try again."
-        )
-    return{
-        "answer":answer,
-        "meta":{
-            "board":board,
-            "class_level":class_level,
-            "subject":subject,
-            "chapter":chapter,
-            "model":model_choice.upper()
-        }
-    }
+        model_name = "gemini-2.5-flash-lite-preview"
 
-    
+    today = datetime.now().strftime("%d %B %Y")
+
     prompt = f"""
 You are an expert {board} Class {class_level} teacher.
 
@@ -344,20 +293,3 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
