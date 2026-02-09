@@ -87,12 +87,12 @@ except Exception as e:
 
     # Gemini overload / high demand
 if "503" in error_text or "UNAVAILABLE" in error_text:
-    return {
+return {
             "error": "AI model server is busy right now. Try again by refreshing the page"
         }, 503
 
     # Any other error
-    return {
+return {
         "error": "Something went wrong. Please try again."
     }, 500
 
@@ -373,6 +373,7 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
 
 
