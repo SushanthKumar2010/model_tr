@@ -62,13 +62,12 @@ def root():
 # ======================
 # MODEL SELECTION (🔥 FIXED)
 # ======================
-
-  if model_choice == "t2":
+if model_choice == "t2":
         model_name = "gemini-3-pro-preview"
-  else:
+else:
        model_name = "gemini-2.5-flash-lite"
 
-    today = datetime.now().strftime("%d %B %Y")    
+today = datetime.now().strftime("%d %B %Y")    
 
 @app.post("/api/ask")
 def ask_question(payload: dict):
@@ -347,6 +346,7 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
 
 
