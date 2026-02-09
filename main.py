@@ -44,14 +44,14 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def root():
     return {"status": "Backend running"}
 
-@app.post("/api/ask")
-def ask_question(payload: dict):
-    board = (payload.get("board") or "ICSE").strip().upper()
-    class_level = (payload.get("class_level") or "10").strip()
-    subject = (payload.get("subject") or "General").strip()
-    chapter = (payload.get("chapter") or "General").strip()
-    question = (payload.get("question") or "").strip()
-    model_choice = (payload.get("model") or "t1").lower()
+#@app.post("/api/ask")
+#def ask_question(payload: dict):
+ #   board = (payload.get("board") or "ICSE").strip().upper()
+  #  class_level = (payload.get("class_level") or "10").strip()
+   # subject = (payload.get("subject") or "General").strip()
+    #chapter = (payload.get("chapter") or "General").strip()
+    #question = (payload.get("question") or "").strip()
+    #model_choice = (payload.get("model") or "t1").lower()
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
@@ -69,32 +69,58 @@ def ask_question(payload: dict):
 
   #  today = datetime.now().strftime("%d %B %Y") 
 
-if model_choice == "t2":
-    model_name = "gemini-3-pro-preview"
-else:
-    model_name = "gemini-2.5-flash-lite-preview"
+@app.post("/api/ask")
+def ask_question(payload: dict):
+    board = (payload.get("board") or "ICSE").strip().upper()
+    class_level = (payload.get("class_level") or "10").strip()
+    subject = (payload.get("subject") or "General").strip()
+    chapter = (payload.get("chapter") or "General").strip()
+    question = (payload.get("question") or "").strip()
 
-today = datetime.now().strftime("%d %B %Y")
+    if board not in ALLOWED_BOARDS:
+        raise HTTPException(status_code=400, detail="Invalid board")
 
-try:
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-    )
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required")
 
-except Exception as e:
-    error_text = str(e)
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+        )
 
-    # Gemini overload / high demand
-if "503" in error_text or "UNAVAILABLE" in error_text:
+        answer = (response.text or "").strip()
+        if not answer:
+            answer = "I could not generate an answer."
+
+    except Exception as e:
+        error_msg = str(e)
+
+        # 🔹 handle Gemini overload (503)
+        if "503" in error_msg or "UNAVAILABLE" in error_msg:
+            return {
+                "answer": "AI model server is busy right now. Try again by refreshing the page",
+                "meta": {
+                    "board": board,
+                    "class_level": class_level,
+                    "subject": subject,
+                    "chapter": chapter,
+                },
+            }
+
+        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
+
+    # ✅ THIS MUST BE INSIDE THE FUNCTION
     return {
-            "error": "AI model server is busy right now. Try again by refreshing the page"
-        }, 503
+        "answer": answer,
+        "meta": {
+            "board": board,
+            "class_level": class_level,
+            "subject": subject,
+            "chapter": chapter,
+        },
+    }
 
-    # Any other error
-    return {
-        "error": "Something went wrong. Please try again."
-    }, 500
     
     prompt = f"""
 You are an expert {board} Class {class_level} teacher.
@@ -320,6 +346,7 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
 
 
