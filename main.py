@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
+from datetime import datetime
 
 # ======================
 # CONFIG
@@ -11,20 +12,14 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set")
 
-if model_choice == "t2":
-        model_name = "gemini-3-pro-preview"
-else:
-        model_name = "gemini-2.5-flash-lite-preview"
-
 ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
 
 # ======================
-# APP SETUP
+# APP
 # ======================
 
 app = FastAPI(
-    title="Class 8, 9, 10, 11, & 12 AI Tutor",
-    description="FastAPI backend for ICSE, CBSE, & SSLC Class 8, 9, 10, 11 & 12 tutoring",
+    title="AI Tutor Backend",
     version="1.0.0",
 )
 
@@ -49,48 +44,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def root():
     return {"status": "Backend running"}
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# ---------- INTRO (FIX) ----------
-@app.post("/api/intro")
-def get_intro(payload: dict):
-    board = (payload.get("board") or "").strip().upper()
-    class_level = (payload.get("class_level") or "10").strip()
-    subject = (payload.get("subject") or "General").strip()
-
-    if board in ALLOWED_BOARDS:
-        board_text = f"{board} Class"
-    else :
-        board_text = "Class"
-
-    intro = (
-        f"Hello! I'm here to help you with your {board_text} "
-        f"{class_level} {subject} questions.\n\n"
-        "Let's start with your first question. "
-        "Please type your problem."
-    )
-
-    return {"intro": intro}
-
-# ---------- SIMPLE CHAT ----------
-@app.post("/api/chat")
-def simple_chat(data: dict):
-    prompt = (data.get("prompt") or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt is required")
-
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-        )
-        return {"response": (response.text or "").strip()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ---------- MAIN ASK ----------
 @app.post("/api/ask")
 def ask_question(payload: dict):
     board = (payload.get("board") or "ICSE").strip().upper()
@@ -98,12 +51,23 @@ def ask_question(payload: dict):
     subject = (payload.get("subject") or "General").strip()
     chapter = (payload.get("chapter") or "General").strip()
     question = (payload.get("question") or "").strip()
+    model_choice = (payload.get("model") or "t1").lower()
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
 
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
+
+    # ======================
+    # MODEL SELECTION (🔥 FIXED)
+    # ======================
+    if model_choice == "t2":
+        model_name = "gemini-3-pro-preview"
+    else:
+        model_name = "gemini-2.5-flash-lite-preview"
+
+    today = datetime.now().strftime("%d %B %Y")
 
     prompt = f"""
 You are an expert {board} Class {class_level} teacher.
@@ -302,17 +266,14 @@ Do not guess.
 Accuracy is more important than confidence.
 """
 
-
     try:
         response = client.models.generate_content(
-            model=MODEL_NAME,
+            model=model_name,
             contents=prompt,
         )
         answer = (response.text or "").strip()
-        if not answer:
-            answer = "I could not generate an answer."
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {
         "answer": answer,
@@ -321,34 +282,14 @@ Accuracy is more important than confidence.
             "class_level": class_level,
             "subject": subject,
             "chapter": chapter,
+            "model_used": model_name,
         },
     }
 
 # ======================
-# LOCAL DEV ONLY
+# LOCAL DEV
 # ======================
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
