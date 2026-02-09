@@ -85,7 +85,7 @@ def ask_question(payload: dict):
 
     try:
         response = client.models.generate_content(
-            model=MODEL_NAME,
+            model=model_name,
             contents=prompt,
         )
 
@@ -346,6 +346,7 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
 
 
