@@ -62,13 +62,41 @@ def ask_question(payload: dict):
     # ======================
     # MODEL SELECTION (🔥 FIXED)
     # ======================
+   # if model_choice == "t2":
+    #    model_name = "gemini-3-pro-preview"
+   # else:
+     #   model_name = "gemini-2.5-flash-lite"
+
+  #  today = datetime.now().strftime("%d %B %Y") 
+
     if model_choice == "t2":
-        model_name = "gemini-3-pro-preview"
-    else:
-        model_name = "gemini-2.5-flash-lite"
+    model_name = "gemini-3-pro-preview"
+else:
+    model_name = "gemini-2.5-flash-lite-preview"
 
-    today = datetime.now().strftime("%d %B %Y")
+today = datetime.now().strftime("%d %B %Y")
 
+try:
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+
+except Exception as e:
+    error_text = str(e)
+
+    # Gemini overload / high demand
+    if "503" in error_text or "UNAVAILABLE" in error_text:
+        return {
+            "error": "AI model server is busy right now. Try again by refreshing the page"
+        }, 503
+
+    # Any other error
+    return {
+        "error": "Something went wrong. Please try again."
+    }, 500
+
+    
     prompt = f"""
 You are an expert {board} Class {class_level} teacher.
 
@@ -293,4 +321,5 @@ Accuracy is more important than confidence.
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
