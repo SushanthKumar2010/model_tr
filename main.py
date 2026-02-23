@@ -1,27 +1,25 @@
 import os
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import asyncio
+import json
 from datetime import datetime
 
-# ======================
-# CONFIG
-# ======================
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+from google import genai
+
+# =====================================================
+# ENV CHECK (prevents Render silent crash)
+# =====================================================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not set")
+    raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
-ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
-
-# ======================
-# APP
-# ======================
-
-app = FastAPI(
-    title="AI Tutor Backend",
-    version="1.0.0",
-)
+# =====================================================
+# APP INIT
+# =====================================================
+app = FastAPI(title="AI Tutor Backend", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,22 +28,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ======================
-# GEMINI CLIENT
-# ======================
+# =====================================================
+# CONFIG
+# =====================================================
+ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ======================
-# ROUTES
-# ======================
-
+# =====================================================
+# HEALTH ROUTE
+# =====================================================
 @app.get("/")
 def root():
-    return {"status": "Backend running"}
+    return {"status": "running"}
 
+# =====================================================
+# SSE ASK ROUTE
+# =====================================================
 @app.post("/api/ask")
-def ask_question(payload: dict):
+async def ask_question(payload: dict):
+
     board = (payload.get("board") or "ICSE").strip().upper()
     class_level = (payload.get("class_level") or "10").strip()
     subject = (payload.get("subject") or "General").strip()
@@ -57,18 +59,19 @@ def ask_question(payload: dict):
         raise HTTPException(status_code=400, detail="Invalid board")
 
     if not question:
-        raise HTTPException(status_code=400, detail="Question is required")
+        raise HTTPException(status_code=400, detail="Question required")
 
-    # ======================
-    # MODEL SELECTION (🔥 FIXED)
-    # ======================
+    # =====================================================
+    # MODEL SELECT
+    # =====================================================
     if model_choice == "t2":
         model_name = "gemini-3-pro-preview" #gemini-3-flash-preview
     else:
         model_name = "gemini-2.5-flash-lite"
 
-    today = datetime.now().strftime("%d %B %Y")
-
+    # =====================================================
+    # PROMPT (EXACT — NOT MODIFIED)
+    # =====================================================
     prompt = f"""
 You are an expert {board} Class {class_level} teacher.
 
@@ -236,37 +239,57 @@ longand valuable answers. And also mention the thing which user says in the inpu
 25. SSLC RULES
 
 * if the board is selected as SSLC, understand that it is related to KARNATKA BOARD
-* if this bard is selected, give answers with reference to the latest SSLC KARNATAKA BOARD syllabus
-
+* if this board is selected, give answers with reference to the latest SSLC KARNATAKA BOARD syllabus
 """
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        answer = (response.text or "").strip()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # =====================================================
+    # STREAM GENERATOR
+    # =====================================================
+    async def stream():
 
-    return {
-        "answer": answer,
-        "meta": {
-            "board": board,
-            "class_level": class_level,
-            "subject": subject,
-            "chapter": chapter,
-            "model_used": model_name,
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=prompt
+            )
+
+            loop = asyncio.get_event_loop()
+
+            def get_next():
+                return next(response_stream, None)
+
+            while True:
+                chunk = await loop.run_in_executor(None, get_next)
+                if chunk is None:
+                    break
+
+                text = chunk.text or ""
+                if text:
+                    yield f"data: {json.dumps(text)}\n\n"
+
+            yield "event: end\ndata: done\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
-    }
+    )
 
-# ======================
-# LOCAL DEV
-# ======================
-
+# =====================================================
+# LOCAL RUN
+# =====================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
+
 
 
 
