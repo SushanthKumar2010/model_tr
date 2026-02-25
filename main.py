@@ -79,7 +79,7 @@ async def ask_question(payload: dict):
     # MODEL SELECT
     # =====================================================
     if model_choice == "t2":
-        model_name = "gemini-3.1-pro-preview"
+        model_name = "gemini-3-flash-preview"
     else:
         model_name = "gemini-2.5-flash-lite"
 
@@ -395,4 +395,5 @@ long and valuable answers. And also mention the thing which user says in the inp
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
 
