@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 
 from google import genai
 from google.genai import types
@@ -21,14 +21,13 @@ if not GEMINI_API_KEY:
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.1")
+app = FastAPI(title="AI Tutor Backend", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
 
 # =====================================================
@@ -46,64 +45,48 @@ SUPPORTED_MIME_TYPES = {
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
-# HEALTH ROUTES
+# HEALTH ROUTE
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.1", "timestamp": datetime.utcnow().isoformat()}
-
-@app.get("/health")
-def health_check():
-    """Health endpoint for frontend monitoring and wake-up checks"""
-    return {
-        "status": "ok",
-        "service": "AI Tutor Backend",
-        "timestamp": datetime.utcnow().isoformat(),
-        "gemini_configured": bool(GEMINI_API_KEY)
-    }
+    return {"status": "running"}
 
 # =====================================================
 # SSE ASK ROUTE  (multimodal)
 # =====================================================
 @app.post("/api/ask")
 async def ask_question(payload: dict):
-    """
-    Main question answering endpoint with streaming response
-    Supports text questions and file uploads (images, PDFs, text files)
-    """
 
-    try:
-        # Extract and validate inputs
-        board        = (payload.get("board")        or "ICSE").strip().upper()
-        class_level  = (payload.get("class_level")  or "10").strip()
-        subject      = (payload.get("subject")      or "General").strip()
-        chapter      = (payload.get("chapter")      or "General").strip()
-        question     = (payload.get("question")     or "").strip()
-        model_choice = (payload.get("model")        or "t1").lower()
-        files        =  payload.get("files")        or []   # list of {name, mimeType, base64}
+    board        = (payload.get("board")        or "ICSE").strip().upper()
+    class_level  = (payload.get("class_level")  or "10").strip()
+    subject      = (payload.get("subject")      or "General").strip()
+    chapter      = (payload.get("chapter")      or "General").strip()
+    question     = (payload.get("question")     or "").strip()
+    model_choice = (payload.get("model")        or "t1").lower()
+    files        =  payload.get("files")        or []   # list of {name, mimeType, base64}
 
-        if board not in ALLOWED_BOARDS:
-            raise HTTPException(status_code=400, detail=f"Invalid board. Allowed: {', '.join(ALLOWED_BOARDS)}")
+    if board not in ALLOWED_BOARDS:
+        raise HTTPException(status_code=400, detail="Invalid board")
 
-        if not question and not files:
-            raise HTTPException(status_code=400, detail="Question or file required")
+    if not question and not files:
+        raise HTTPException(status_code=400, detail="Question or file required")
 
-        # If no question text but files exist, add a default prompt
-        if not question and files:
-            question = "Please analyse this and answer any questions based on it."
+    # If no question text but files exist, add a default prompt
+    if not question and files:
+        question = "Please analyse this and answer any questions based on it."
 
-        # =====================================================
-        # MODEL SELECT
-        # =====================================================
-        if model_choice == "t2":
-            model_name = "gemini-3-flash-preview"
-        else:
-            model_name = "gemini-2.5-flash-lite"
+    # =====================================================
+    # MODEL SELECT
+    # =====================================================
+    if model_choice == "t2":
+        model_name = "gemini-3-flash-preview"
+    else:
+        model_name = "gemini-2.5-flash-lite"
 
-        # =====================================================
-        # PROMPT
-        # =====================================================
-        prompt_text = f"""
+    # =====================================================
+    # PROMPT
+    # =====================================================
+    prompt_text = f"""
 You are an expert {board} Class {class_level} teacher.
 
 Board: {board}
@@ -282,192 +265,134 @@ long and valuable answers. And also mention the thing which user says in the inp
 * If the image quality is poor or unclear, state that briefly and answer based on what is visible.
 """
 
-        # =====================================================
-        # BUILD GEMINI CONTENTS (multimodal)
-        # Images  → inline_data (fast, no upload needed)
-        # PDFs    → Gemini File API (handles large files, proper page parsing)
-        # Text    → appended to prompt directly
-        # =====================================================
-        contents = []
-        uploaded_file_uris = []   # track for optional cleanup
+    # =====================================================
+    # BUILD GEMINI CONTENTS (multimodal)
+    # Images  → inline_data (fast, no upload needed)
+    # PDFs    → Gemini File API (handles large files, proper page parsing)
+    # Text    → appended to prompt directly
+    # =====================================================
+    contents = []
+    uploaded_file_uris = []   # track for optional cleanup
 
-        for f in files:
-            mime = f.get("mimeType", "")
-            b64  = f.get("base64",   "")
-            name = f.get("name",     "file")
+    for f in files:
+        mime = f.get("mimeType", "")
+        b64  = f.get("base64",   "")
+        name = f.get("name",     "file")
 
-            if not b64 or not mime:
-                continue
+        if not b64 or not mime:
+            continue
 
-            if mime not in SUPPORTED_MIME_TYPES:
-                prompt_text += f"\n\n[Note: File '{name}' ({mime}) is unsupported and was skipped.]"
-                continue
+        if mime not in SUPPORTED_MIME_TYPES:
+            prompt_text += f"\n\n[Note: File '{name}' ({mime}) is unsupported and was skipped.]"
+            continue
 
+        try:
+            raw_bytes = base64.b64decode(b64)
+        except Exception as e:
+            prompt_text += f"\n\n[Note: Could not decode file '{name}': {e}]"
+            continue
+
+        if mime == "application/pdf":
+            # ── PDF: upload via File API, then reference by URI ──
             try:
-                raw_bytes = base64.b64decode(b64)
-            except Exception as e:
-                prompt_text += f"\n\n[Note: Could not decode file '{name}': {e}]"
-                continue
+                import io
+                file_obj = io.BytesIO(raw_bytes)
+                file_obj.name = name  # some SDK versions use this
 
-            if mime == "application/pdf":
-                # ── PDF: upload via File API, then reference by URI ──
-                try:
-                    import io
-                    file_obj = io.BytesIO(raw_bytes)
-                    file_obj.name = name  # some SDK versions use this
-
-                    uploaded = client.files.upload(
-                        file=file_obj,
-                        config=types.UploadFileConfig(
-                            mime_type="application/pdf",
-                            display_name=name,
-                        )
+                uploaded = client.files.upload(
+                    file=file_obj,
+                    config=types.UploadFileConfig(
+                        mime_type="application/pdf",
+                        display_name=name,
                     )
-
-                    # Wait for file to be ACTIVE (usually instant for small PDFs)
-                    import time
-                    max_wait = 20  # seconds
-                    waited = 0
-                    while uploaded.state.name == "PROCESSING" and waited < max_wait:
-                        time.sleep(1)
-                        waited += 1
-                        uploaded = client.files.get(name=uploaded.name)
-
-                    if uploaded.state.name == "ACTIVE":
-                        contents.append(types.Part.from_uri(
-                            uri=uploaded.uri,
-                            mime_type="application/pdf"
-                        ))
-                        uploaded_file_uris.append(uploaded.name)
-                    else:
-                        prompt_text += f"\n\n[Note: PDF '{name}' could not be processed (state: {uploaded.state.name}).]"
-
-                except Exception as e:
-                    # Fallback: try inline if File API fails
-                    prompt_text += f"\n\n[Note: PDF upload failed ({e}), trying inline.]"
-                    try:
-                        contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
-                    except Exception:
-                        prompt_text += f"\n\n[Note: Could not process PDF '{name}' at all.]"
-
-            elif mime == "text/plain":
-                # ── Plain text: decode and embed directly in prompt ──
-                try:
-                    text_content = raw_bytes.decode("utf-8", errors="replace")
-                    prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
-                except Exception as e:
-                    prompt_text += f"\n\n[Note: Could not read text file '{name}': {e}]"
-
-            else:
-                # ── Images: inline_data (jpeg, png, gif, webp) ──
-                try:
-                    contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
-                except Exception as e:
-                    prompt_text += f"\n\n[Note: Could not process image '{name}': {e}]"
-
-        # Text prompt goes last
-        contents.append(types.Part.from_text(text=prompt_text))
-
-        # =====================================================
-        # STREAM GENERATOR WITH IMPROVED ERROR HANDLING
-        # =====================================================
-        async def stream():
-            try:
-                response_stream = client.models.generate_content_stream(
-                    model=model_name,
-                    contents=contents,
                 )
 
-                loop = asyncio.get_event_loop()
+                # Wait for file to be ACTIVE (usually instant for small PDFs)
+                import time
+                max_wait = 20  # seconds
+                waited = 0
+                while uploaded.state.name == "PROCESSING" and waited < max_wait:
+                    time.sleep(1)
+                    waited += 1
+                    uploaded = client.files.get(name=uploaded.name)
 
-                def get_next():
-                    return next(response_stream, None)
-
-                chunk_count = 0
-                while True:
-                    chunk = await loop.run_in_executor(None, get_next)
-                    if chunk is None:
-                        break
-                    text = chunk.text or ""
-                    if text:
-                        chunk_count += 1
-                        yield f"data: {json.dumps(text)}\n\n"
-
-                # Send completion event
-                yield "event: end\ndata: done\n\n"
-                
-                # Log success
-                print(f"[SUCCESS] Streamed {chunk_count} chunks for question: {question[:50]}...")
+                if uploaded.state.name == "ACTIVE":
+                    contents.append(types.Part.from_uri(
+                        uri=uploaded.uri,
+                        mime_type="application/pdf"
+                    ))
+                    uploaded_file_uris.append(uploaded.name)
+                else:
+                    prompt_text += f"\n\n[Note: PDF '{name}' could not be processed (state: {uploaded.state.name}).]"
 
             except Exception as e:
-                error_msg = str(e)
-                print(f"[ERROR] Streaming failed: {error_msg}")
-                yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
+                # Fallback: try inline if File API fails
+                prompt_text += f"\n\n[Note: PDF upload failed ({e}), trying inline.]"
+                try:
+                    contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
+                except Exception:
+                    prompt_text += f"\n\n[Note: Could not process PDF '{name}' at all.]"
 
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control":    "no-cache",
-                "Connection":       "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
+        elif mime == "text/plain":
+            # ── Plain text: decode and embed directly in prompt ──
+            try:
+                text_content = raw_bytes.decode("utf-8", errors="replace")
+                prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
+            except Exception as e:
+                prompt_text += f"\n\n[Note: Could not read text file '{name}': {e}]"
 
-    except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
-    except Exception as e:
-        # Catch any unexpected errors and return proper error response
-        print(f"[ERROR] Unexpected error in /api/ask: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
+        else:
+            # ── Images: inline_data (jpeg, png, gif, webp) ──
+            try:
+                contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
+            except Exception as e:
+                prompt_text += f"\n\n[Note: Could not process image '{name}': {e}]"
 
-# =====================================================
-# ERROR HANDLERS
-# =====================================================
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Global error handler for uncaught exceptions"""
-    print(f"[GLOBAL ERROR] {type(exc).__name__}: {str(exc)}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "detail": str(exc),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+    # Text prompt goes last
+    contents.append(types.Part.from_text(text=prompt_text))
+
+    # =====================================================
+    # STREAM GENERATOR
+    # =====================================================
+    async def stream():
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+            )
+
+            loop = asyncio.get_event_loop()
+
+            def get_next():
+                return next(response_stream, None)
+
+            while True:
+                chunk = await loop.run_in_executor(None, get_next)
+                if chunk is None:
+                    break
+                text = chunk.text or ""
+                if text:
+                    yield f"data: {json.dumps(text)}\n\n"
+
+            yield "event: end\ndata: done\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "Connection":       "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
-
-# =====================================================
-# STARTUP/SHUTDOWN EVENTS
-# =====================================================
-@app.on_event("startup")
-async def startup_event():
-    """Log startup information"""
-    print("=" * 50)
-    print("AI Tutor Backend Starting...")
-    print(f"Version: 3.1")
-    print(f"Gemini API Key: {'✓ Configured' if GEMINI_API_KEY else '✗ Missing'}")
-    print(f"Allowed Boards: {', '.join(ALLOWED_BOARDS)}")
-    print("=" * 50)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    print("AI Tutor Backend Shutting Down...")
 
 # =====================================================
 # LOCAL RUN
 # =====================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=10000,
-        log_level="info",
-        access_log=True
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)
+
