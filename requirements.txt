@@ -1,9 +1,9 @@
-fastapi
-uvicorn[standard]
-google-genai
 python-dotenv
 flask
 flask-cors
-google-genai
-python-multipart
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+google-genai==0.2.2
+python-multipart==0.0.12
 # python-multipart is required by FastAPI to handle form-data if you ever switch from JSON base64
+
