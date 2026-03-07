@@ -175,8 +175,38 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
    - Plus or minus: + −
    - Square root: √
 
+2a. EQUATION NOTATION — the frontend auto-renders these, so use them exactly:
+
+   SUPERSCRIPTS — use ^ for powers, exponents, charges:
+      x^2   a^3   m^2   cm^3   10^8
+      Multi-char: use braces  →  x^{{n+1}}   Fe^{{3+}}   Cu^{{2+}}   10^{{-19}}
+      Examples:
+        x squared        →  x^2
+        10 to the -19    →  10^{{-19}}
+        Iron(III) ion    →  Fe^{{3+}}
+
+   SUBSCRIPTS — use _ for chemical formulas:
+      H_2   O_2   CO_2
+      Multi-char: use braces  →  C_{{6}}H_{{12}}O_{{6}}   Na_{{2}}SO_{{4}}
+      Examples:
+        Water            →  H_2O
+        Sulphuric acid   →  H_2SO_4
+        Glucose          →  C_{{6}}H_{{12}}O_{{6}}
+        Sodium sulphate  →  Na_2SO_4
+
+   CHEMICAL REACTION ARROW — use -> (renders as →):
+      Always balance the equation.
+      State symbols: (s) (l) (g) (aq) — plain text, no subscript needed
+      Examples:
+        2H_2 + O_2 -> 2H_2O
+        CaCO_3 -> CaO + CO_2
+        Zn + H_2SO_4 -> ZnSO_4 + H_2
+        CH_4 + 2O_2 -> CO_2 + 2H_2O
+        Cu^{{2+}} + 2OH^- -> Cu(OH)_2
+
 3. Write mathematics in NORMAL SCHOOL STYLE.
    Example: sin 30° = 1/2
+   Also using the notation above: v^2 = u^2 + 2as   E = mc^2   KE = (1/2)mv^2
 
 4. Keep the answer:
    - SHORT
@@ -189,6 +219,7 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
    - Use ONLY SINGLE ASTERISKS like *this*
    - NEVER use double asterisks **
    - The MAIN FINAL RESULT must be inside single asterisks
+   - Examples: *v^2 = u^2 + 2as*   *H_2SO_4 is a strong dibasic acid*
 
 6. Language must be:
    - Simple
