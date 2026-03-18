@@ -1,29 +1,27 @@
-
-
 import os
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+import asyncio
+import json
+import base64
 from datetime import datetime
 
-# ======================
-# CONFIG
-# ======================
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+from google import genai
+from google.genai import types
+
+# =====================================================
+# ENV CHECK
+# =====================================================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not set")
+    raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
-ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
-
-# ======================
-# APP
-# ======================
-
-app = FastAPI(
-    title="AI Tutor Backend",
-    version="1.0.0",
-)
+# =====================================================
+# APP INIT
+# =====================================================
+app = FastAPI(title="AI Tutor Backend", version="3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,46 +30,119 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ======================
-# GEMINI CLIENT
-# ======================
+# =====================================================
+# CONFIG
+# =====================================================
+ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
+
+# Supported MIME types Gemini can process
+SUPPORTED_MIME_TYPES = {
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/pdf",
+    "text/plain",
+}
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ======================
-# ROUTES
-# ======================
-
+# =====================================================
+# HEALTH ROUTE
+# =====================================================
 @app.get("/")
 def root():
-    return {"status": "Backend running"}
+    return {"status": "running", "version": "3.1"}
 
+@app.get("/health")
+def health():
+    """Health check endpoint for monitoring"""
+    try:
+        # Quick test to verify Gemini API is accessible
+        return {
+            "status": "healthy",
+            "api_key_present": bool(GEMINI_API_KEY),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+# =====================================================
+# IMPROVED FILE UPLOAD WITH ASYNC HANDLING
+# =====================================================
+async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
+    """
+    Upload file to Gemini File API with proper async handling and retries
+    """
+    import io
+    
+    try:
+        file_obj = io.BytesIO(raw_bytes)
+        file_obj.name = name
+
+        # Upload file
+        uploaded = client.files.upload(
+            file=file_obj,
+            config=types.UploadFileConfig(
+                mime_type=mime_type,
+                display_name=name,
+            )
+        )
+
+        # Wait for file to be ACTIVE with proper async handling
+        max_attempts = 30  # 30 seconds max
+        for attempt in range(max_attempts):
+            if uploaded.state.name == "ACTIVE":
+                return uploaded.uri, uploaded.name
+            
+            if uploaded.state.name == "FAILED":
+                raise Exception(f"File processing failed: {name}")
+            
+            await asyncio.sleep(1)
+            uploaded = client.files.get(name=uploaded.name)
+        
+        # Timeout reached
+        raise Exception(f"File processing timeout for: {name}")
+        
+    except Exception as e:
+        raise Exception(f"Failed to upload {name}: {str(e)}")
+
+# =====================================================
+# SSE ASK ROUTE  (multimodal)
+# =====================================================
 @app.post("/api/ask")
-def ask_question(payload: dict):
-    board = (payload.get("board") or "ICSE").strip().upper()
-    class_level = (payload.get("class_level") or "10").strip()
-    subject = (payload.get("subject") or "General").strip()
-    chapter = (payload.get("chapter") or "General").strip()
-    question = (payload.get("question") or "").strip()
-    model_choice = (payload.get("model") or "t1").lower()
+async def ask_question(payload: dict):
+
+    board        = (payload.get("board")        or "ICSE").strip().upper()
+    class_level  = (payload.get("class_level")  or "10").strip()
+    subject      = (payload.get("subject")      or "General").strip()
+    chapter      = (payload.get("chapter")      or "General").strip()
+    question     = (payload.get("question")     or "").strip()
+    model_choice = (payload.get("model")        or "t1").lower()
+    files        =  payload.get("files")        or []   # list of {name, mimeType, base64}
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
 
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required")
+    if not question and not files:
+        raise HTTPException(status_code=400, detail="Question or file required")
 
-    # ======================
-    # MODEL SELECTION (🔥 FIXED)
-    # ======================
+    # If no question text but files exist, add a default prompt
+    if not question and files:
+        question = "Please analyse this and answer any questions based on it."
+
+    # =====================================================
+    # MODEL SELECT
+    # =====================================================
     if model_choice == "t2":
-        model_name = "gemini-3-pro-preview" #gemini-3-flash-preview
+        model_name = "gemini-3.1-pro-preview"
     else:
-        model_name = "gemini-2.5-flash-lite"
+        model_name = "gemini-3.1-flash-lite-preview"
 
-    today = datetime.now().strftime("%d %B %Y")
-
-    prompt = f"""
+    # =====================================================
+    # PROMPT
+    # =====================================================
+    prompt_text = f"""
 You are an expert {board} Class {class_level} teacher.
 
 Board: {board}
@@ -95,177 +166,216 @@ REQUIREMENTS:
 STRICT ANSWERING RULES (VERY IMPORTANT):
 
 1. Use PLAIN TEXT ONLY.
-
-- NO Markdown
-- NO HTML
-- NO LaTeX
-- NO emojis
-- NO special formatting commands
+   - NO Markdown, NO HTML, NO LaTeX, NO emojis
 
 2. Allowed mathematical symbols ONLY:
-- Degrees: 30°
-- Fractions: 1/2
-- Equals sign: =
-- Plus or minus: + −
-- Square root: √
+   - Degrees: 30°
+   - Fractions: 1/2
+   - Equals sign: =
+   - Plus or minus: + −
+   - Square root: √
 
-3. Do NOT use:
-- LaTeX-style syntax (\\sin, \\frac, ^, _)
-- Markdown symbols (**, ##, -, etc.)
+2a. EQUATION NOTATION — the frontend auto-renders these, so use them exactly:
 
-4. Write mathematics in NORMAL SCHOOL STYLE.
-Example: sin 30° = 1/2
+   SUPERSCRIPTS — use ^ for powers, exponents, charges:
+      x^2   a^3   m^2   cm^3   10^8
+      Multi-char: use braces  →  x^{{n+1}}   Fe^{{3+}}   Cu^{{2+}}   10^{{-19}}
+      Examples:
+        x squared        →  x^2
+        10 to the -19    →  10^{{-19}}
+        Iron(III) ion    →  Fe^{{3+}}
 
-5. Keep the answer:
-- SHORT
-- CLEAR
-- CONCEPTUALLY DEEP
-- STRICTLY exam-oriented
+   SUBSCRIPTS — use _ for chemical formulas:
+      H_2   O_2   CO_2
+      Multi-char: use braces  →  C_{{6}}H_{{12}}O_{{6}}   Na_{{2}}SO_{{4}}
+      Examples:
+        Water            →  H_2O
+        Sulphuric acid   →  H_2SO_4
+        Glucose          →  C_{{6}}H_{{12}}O_{{6}}
+        Sodium sulphate  →  Na_2SO_4
 
-6. Follow this STRUCTURE exactly:
-- Core idea
-- Explanation in 2 to 4 lines
-- ONE simple value or example if useful
-- Final answer or result
+   CHEMICAL REACTION ARROW — use -> (renders as →):
+      Always balance the equation.
+      State symbols: (s) (l) (g) (aq) — plain text, no subscript needed
+      Examples:
+        2H_2 + O_2 -> 2H_2O
+        CaCO_3 -> CaO + CO_2
+        Zn + H_2SO_4 -> ZnSO_4 + H_2
+        CH_4 + 2O_2 -> CO_2 + 2H_2O
+        Cu^{{2+}} + 2OH^- -> Cu(OH)_2
 
-7. IMPORTANT HIGHLIGHTING RULES:
-- Highlight EVERY important formulas, definitions, or final answers
-- Use ONLY SINGLE ASTERISKS like *this*
-- NEVER use double asterisks **
-- NEVER over-highlight
-- The MAIN FINAL RESULT must be inside single asterisks
+3. Write mathematics in NORMAL SCHOOL STYLE.
+   Example: sin 30° = 1/2
+   Also using the notation above: v^2 = u^2 + 2as   E = mc^2   KE = (1/2)mv^2
 
-8. Do NOT mention:
-- AI
-- Instructions
-- Formatting rules
-- Any external syllabus or board
+4. Keep the answer:
+   - SHORT
+   - CLEAR
+   - CONCEPTUALLY DEEP
+   - STRICTLY exam-oriented
 
-9. Language must be:
-- Simple
-- Calm
-- Clear
-- Suitable for Class {class_level} students
+5. IMPORTANT HIGHLIGHTING RULES:
+   - Highlight important formulas, definitions, or final answers
+   - Use ONLY SINGLE ASTERISKS like *this*
+   - NEVER use double asterisks **
+   - The MAIN FINAL RESULT must be inside single asterisks
+   - Examples: *v^2 = u^2 + 2as*   *H_2SO_4 is a strong dibasic acid*
 
-10. Output structure :
-- while giving the output don't be dry, instead be friendly and conversational with the students and generate
-longand valuable answers. And also mention the thing which user says in the input "ex: class 10, ICSE, maths, ..." and you should generate output with reference to this.
+6. Language must be:
+   - Simple
+   - Calm
+   - Clear
+   - Suitable for Class {class_level} students
 
-11. BOARD ALIGNMENT RULE
+7. While giving output, be friendly and conversational with students.
 
-* Answer ONLY what is officially taught at Class {class_level} level for the given {board}.
-* Do NOT use higher-class shortcuts, advanced tricks, or competitive exam logic.
-* If ICSE and CBSE approaches differ, follow the method strictly accepted in the given {board}.
+8. BOARD ALIGNMENT: Answer ONLY what is officially taught at Class {class_level} level for {board}.
 
-12. EXAM ANSWER EXPECTATION
+9. EXAM ANSWER EXPECTATION: Frame the answer exactly how a board examiner expects it.
 
-* Frame the answer exactly how a board examiner expects it.
-* Use proper terminology used in {board} textbooks.
-* Avoid casual wording that cannot earn marks in an exam.
+10. STEP MARKING AWARENESS: Write steps in the correct logical order used for marking.
 
-13. STEP MARKING AWARENESS
+11. DEFINITIONS RULE: Start with the exact definition in simple board language.
 
-* Write steps in the correct logical order used for marking.
-* Do NOT skip steps that usually carry marks, even if the math looks simple.
-
-14. DEFINITIONS RULE
-
-* If the question involves a definition, law, principle, or statement,
-* Start with the *exact definition* in simple board language.
-* Do NOT paraphrase important definitions loosely.
-
-15. DERIVATION RULE (If Applicable)
-
-* If the question asks for a derivation,
-* Write it in the standard school sequence.
-* Do NOT compress or over-explain.
-* End with the required final expression clearly.
-
-16. NUMERICALS RULE
-
-* Always write:
-* Given values
-* Formula used
-* Substitution
-* Final answer with unit (if applicable)
-* Units must match board standards.
-
-17. DIAGRAM REFERENCE RULE
-
-* If a diagram is normally required in board exams,
-* Mention “A neat labelled diagram should be drawn”
-* Briefly explain using words only (no drawing).
-
-18. COMMON MISTAKE RULE
-
-* Mention a common mistake ONLY if students frequently lose marks because of it.
-* Keep it to ONE short line.
-
-19. WORD LIMIT DISCIPLINE
-
-* Do NOT add extra theory beyond what is needed to score full marks.
-* No storytelling, no motivation talk, no unrelated facts.
-
-20. SUBJECT-SPECIFIC STRICTNESS
-
-* Maths: logical steps, no skipped working.
-* Physics: formula, substitution, unit correctness.
-* Chemistry: correct reactions, conditions, symbols, and names.
-* Biology: keyword-based answers, no vague explanations.
-
-21. LANGUAGE CONTROL
-
-* Use simple school-level English.
-* No fancy vocabulary.
-* Every sentence should help gain marks.
-
-22. FINAL ANSWER EMPHASIS
-
-* The final result or conclusion MUST be clearly stated at the end.
-* The examiner should be able to find the answer immediately.
-
-23. NO ASSUMPTIONS RULE
-
-* Do NOT assume what the student knows.
-* Explain briefly but clearly, exactly at Class {class_level} level.
-
-24. ICSE AND CBSE EQUALITY RULE
-
-* Treat ICSE, CBSE, & SSLC with equal seriousness.
-* Do NOT favor NCERT wording unless the board is CBSE.
-* Do NOT favor concise answers unless the board is ICSE.
-
-25. SSLC RULES
-
-* if the board is selected as SSLC, understand that it is related to KARNATKA BOARD
-* if this bard is selected, give answers with reference to the latest SSLC KARNATAKA BOARD syllabus
-
+12. FILE / IMAGE RULES:
+    - If an image is attached, carefully read and analyse it
+    - If it's a question paper, solve ALL visible questions step by step
+    - If it's a diagram, explain what it shows in exam-appropriate language
+    - If it's a PDF, treat it as a document and answer based on its content
+    - Always relate file content back to {board} Class {class_level} {subject} syllabus
 """
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        answer = (response.text or "").strip()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # =====================================================
+    # BUILD GEMINI CONTENTS (multimodal) WITH ERROR HANDLING
+    # =====================================================
+    contents = []
+    uploaded_file_uris = []
+    file_errors = []
 
-    return {
-        "answer": answer,
-        "meta": {
-            "board": board,
-            "class_level": class_level,
-            "subject": subject,
-            "chapter": chapter,
-            "model_used": model_name,
+    for f in files:
+        mime = f.get("mimeType", "")
+        b64  = f.get("base64",   "")
+        name = f.get("name",     "file")
+
+        if not b64 or not mime:
+            continue
+
+        if mime not in SUPPORTED_MIME_TYPES:
+            file_errors.append(f"File '{name}' ({mime}) is unsupported")
+            continue
+
+        try:
+            raw_bytes = base64.b64decode(b64)
+        except Exception as e:
+            file_errors.append(f"Could not decode '{name}': {str(e)}")
+            continue
+
+        if mime == "application/pdf":
+            # ── PDF: upload via File API with improved error handling ──
+            try:
+                uri, file_name = await upload_file_to_gemini(raw_bytes, "application/pdf", name)
+                contents.append(types.Part.from_uri(
+                    uri=uri,
+                    mime_type="application/pdf"
+                ))
+                uploaded_file_uris.append(file_name)
+            except Exception as e:
+                # Fallback: try inline if File API fails
+                try:
+                    contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
+                except Exception:
+                    file_errors.append(f"Could not process PDF '{name}': {str(e)}")
+
+        elif mime == "text/plain":
+            # ── Plain text: decode and embed directly in prompt ──
+            try:
+                text_content = raw_bytes.decode("utf-8", errors="replace")
+                prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
+            except Exception as e:
+                file_errors.append(f"Could not read text file '{name}': {str(e)}")
+
+        else:
+            # ── Images: inline_data (jpeg, png, gif, webp) ──
+            try:
+                contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
+            except Exception as e:
+                file_errors.append(f"Could not process image '{name}': {str(e)}")
+
+    # Add file errors to prompt if any
+    if file_errors:
+        prompt_text += "\n\n[Note: Some files could not be processed: " + "; ".join(file_errors) + "]"
+
+    # Text prompt goes last
+    contents.append(types.Part.from_text(text=prompt_text))
+
+    # =====================================================
+    # STREAM GENERATOR WITH IMPROVED ERROR HANDLING
+    # =====================================================
+    async def stream():
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+            )
+
+            loop = asyncio.get_event_loop()
+
+            def get_next():
+                return next(response_stream, None)
+
+            chunk_count = 0
+            while True:
+                try:
+                    chunk = await loop.run_in_executor(None, get_next)
+                    if chunk is None:
+                        break
+                    text = chunk.text or ""
+                    if text:
+                        chunk_count += 1
+                        yield f"data: {json.dumps(text)}\n\n"
+                except StopIteration:
+                    break
+                except Exception as chunk_error:
+                    # Log chunk error but try to continue
+                    print(f"Chunk error: {chunk_error}")
+                    if chunk_count == 0:
+                        # If no chunks sent yet, report error
+                        raise chunk_error
+                    # Otherwise, just end the stream
+                    break
+
+            yield "event: end\ndata: done\n\n"
+
+        except Exception as e:
+            error_msg = str(e)
+            # Send user-friendly error message
+            if "quota" in error_msg.lower():
+                yield f"event: error\ndata: API quota exceeded. Please try again later.\n\n"
+            elif "api key" in error_msg.lower():
+                yield f"event: error\ndata: API configuration error. Please contact support.\n\n"
+            else:
+                yield f"event: error\ndata: {error_msg}\n\n"
+        finally:
+            # Cleanup uploaded files
+            for file_name in uploaded_file_uris:
+                try:
+                    client.files.delete(name=file_name)
+                except:
+                    pass  # Silent cleanup failure
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "Connection":       "keep-alive",
+            "X-Accel-Buffering": "no",
         },
-    }
+    )
 
-# ======================
-# LOCAL DEV
-# ======================
-
+# =====================================================
+# LOCAL RUN
+# =====================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
