@@ -21,7 +21,7 @@ if not GEMINI_API_KEY:
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.1")
+app = FastAPI(title="AI Tutor Backend", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,7 +35,6 @@ app.add_middleware(
 # =====================================================
 ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
 
-# Supported MIME types Gemini can process
 SUPPORTED_MIME_TYPES = {
     "image/jpeg", "image/png", "image/gif", "image/webp",
     "application/pdf",
@@ -45,70 +44,281 @@ SUPPORTED_MIME_TYPES = {
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
+# FORMATTING RULES
+# =====================================================
+
+# For Maths, Physics, Chemistry, Biology
+FORMATTING_RULES_SCIENCE = """
+OUTPUT RULES:
+- Plain text only. No Markdown, no HTML, no LaTeX.
+- Superscripts: x^2, 10^{{-19}}, Fe^{{3+}}, Cu^{{2+}}
+- Subscripts: H_2O, H_2SO_4, C_{{6}}H_{{12}}O_{{6}}
+- Reaction arrow: -> (e.g. 2H_2 + O_2 -> 2H_2O)
+- Highlight key formulas/answers with *single asterisks* only. Never use **double**.
+- Be friendly and concise for a Class {class_level} student.
+"""
+
+# For English, History, Geography, Computer, General
+FORMATTING_RULES_MINIMAL = """
+OUTPUT RULES:
+- Plain text only. No Markdown, no HTML, no LaTeX.
+- Highlight key terms or final answers with *single asterisks* only. Never use **double**.
+- Be friendly and concise for a Class {class_level} student.
+"""
+
+# =====================================================
+# SUBJECT-SPECIFIC PROMPT BUILDERS
+# =====================================================
+
+def build_maths_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Maths teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+MATHS-SPECIFIC RULES:
+- Show ALL working steps clearly, one step per line.
+- State the formula used before applying it.
+- Verify the answer where applicable.
+- Mention units if the problem involves measurement.
+- Highlight the final answer: *answer here*
+- Use only methods taught at {board} Class {class_level} level.
+- Warn about common calculation mistakes if relevant.
+
+{FORMATTING_RULES_SCIENCE.format(class_level=class_level)}"""
+
+
+def build_physics_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Physics teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+PHYSICS-SPECIFIC RULES:
+- State the relevant law or principle first.
+- Write the formula, then substitute values with units.
+- Show unit conversions if needed.
+- Always include units in the final answer.
+- Highlight key formula and result: *formula*
+- Use only {board} Class {class_level} syllabus methods.
+- Mention SI units and common mistakes where relevant.
+
+{FORMATTING_RULES_SCIENCE.format(class_level=class_level)}"""
+
+
+def build_chemistry_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Chemistry teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+CHEMISTRY-SPECIFIC RULES:
+- Write balanced chemical equations using -> for reaction arrow.
+- Use correct subscript/superscript notation: H_2SO_4, Fe^{{3+}}.
+- Include state symbols (s), (l), (g), (aq) in equations.
+- For reactions: name the type (combination, decomposition, etc.).
+- Highlight key equation or concept: *equation or concept*
+- Only use {board} Class {class_level} syllabus content.
+
+{FORMATTING_RULES_SCIENCE.format(class_level=class_level)}"""
+
+
+def build_biology_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Biology teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+BIOLOGY-SPECIFIC RULES:
+- Start with the exact board-level definition.
+- Use correct scientific terminology as expected in {board} exams.
+- For diagrams mentioned: describe key parts and their functions.
+- Structure: Definition → Explanation → Example/Function → Exam tip.
+- Highlight key term or answer: *key term*
+- Keep answers factual and concise as expected in board exams.
+
+{FORMATTING_RULES_SCIENCE.format(class_level=class_level)}"""
+
+
+def build_english_lit_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} English Literature teacher.
+
+Board: {board} | Class: {class_level} | Text/Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+ENGLISH LITERATURE RULES:
+- Reference the exact text, poem, or prose from the {board} syllabus.
+- For character questions: traits → evidence from text → significance.
+- For theme questions: identify → explain → quote briefly → board relevance.
+- For extract questions: context → meaning → literary devices → effect.
+- Write in formal exam language.
+- Keep answers within expected word limits for {board} Class {class_level}.
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+def build_english_grammar_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} English Grammar teacher.
+
+Board: {board} | Class: {class_level} | Topic: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+ENGLISH GRAMMAR RULES:
+- State the grammatical rule first, clearly.
+- Give the correct answer with a brief explanation.
+- Provide 1-2 examples to reinforce the rule.
+- For transformation/sentence rewriting: show the original and rewritten form.
+- For comprehension: answer in complete sentences.
+- Stick to {board} Class {class_level} grammar syllabus.
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+def build_history_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} History & Civics / Economics teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+HISTORY / CIVICS / ECONOMICS RULES:
+- Give dates and facts accurately as per {board} syllabus.
+- Structure: Introduction → Key Points → Significance/Cause/Effect → Conclusion.
+- For short answers: 3-4 points, clear and direct.
+- For long answers: introduction, developed paragraphs, conclusion.
+- Bold key terms using *term* notation.
+- Align answer format to {board} Class {class_level} exam expectations.
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+def build_geography_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Geography teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+GEOGRAPHY RULES:
+- For map-based questions: name regions, directions, and features precisely.
+- For physical geography: explain processes step by step.
+- For human geography: link causes to effects logically.
+- Use correct geographical terminology as expected in {board} exams.
+- Highlight key term or answer: *key term*
+- Reference Indian/world geography as per {board} Class {class_level} syllabus.
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+def build_computer_prompt(board, class_level, chapter, question):
+    return f"""You are an expert {board} Class {class_level} Computer Applications teacher.
+
+Board: {board} | Class: {class_level} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+COMPUTER APPLICATIONS RULES:
+- For theory: definition → explanation → example → board relevance.
+- For programs (Java/Python): write clean, commented code.
+- For output questions: trace through step by step, show each variable change.
+- For algorithms/flowcharts: follow standard conventions.
+- Stick strictly to {board} Class {class_level} syllabus (e.g. BlueJ for ICSE).
+- Highlight key term or answer: *key term*
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+def build_general_prompt(board, class_level, subject, chapter, question):
+    return f"""You are an expert {board} Class {class_level} {subject} teacher.
+
+Board: {board} | Class: {class_level} | Subject: {subject} | Chapter: {chapter}
+
+Student's question: \"\"\"{question}\"\"\"
+
+- Answer clearly and concisely at {board} Class {class_level} level.
+- Use only methods and content from the official {board} syllabus.
+- Show steps where required.
+- Highlight key results: *answer*
+- Be exam-oriented and student-friendly.
+
+{FORMATTING_RULES_MINIMAL.format(class_level=class_level)}"""
+
+
+# =====================================================
+# SUBJECT ROUTER
+# =====================================================
+def build_prompt(board, class_level, subject, chapter, question):
+    s = subject.lower()
+    if "maths" in s or "math" in s:
+        return build_maths_prompt(board, class_level, chapter, question)
+    elif "physics" in s:
+        return build_physics_prompt(board, class_level, chapter, question)
+    elif "chemistry" in s:
+        return build_chemistry_prompt(board, class_level, chapter, question)
+    elif "biology" in s:
+        return build_biology_prompt(board, class_level, chapter, question)
+    elif "english lit" in s or "literature" in s:
+        return build_english_lit_prompt(board, class_level, chapter, question)
+    elif "english gram" in s or "grammar" in s:
+        return build_english_grammar_prompt(board, class_level, chapter, question)
+    elif "history" in s or "civics" in s or "economics" in s:
+        return build_history_prompt(board, class_level, chapter, question)
+    elif "geography" in s or "geo" in s:
+        return build_geography_prompt(board, class_level, chapter, question)
+    elif "computer" in s:
+        return build_computer_prompt(board, class_level, chapter, question)
+    else:
+        return build_general_prompt(board, class_level, subject, chapter, question)
+
+
+# =====================================================
 # HEALTH ROUTE
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.1"}
+    return {"status": "running", "version": "4.0"}
 
 @app.get("/health")
 def health():
-    """Health check endpoint for monitoring"""
-    try:
-        # Quick test to verify Gemini API is accessible
-        return {
-            "status": "healthy",
-            "api_key_present": bool(GEMINI_API_KEY),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+    return {
+        "status": "healthy",
+        "api_key_present": bool(GEMINI_API_KEY),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
 
 # =====================================================
-# IMPROVED FILE UPLOAD WITH ASYNC HANDLING
+# FILE UPLOAD HELPER
 # =====================================================
 async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
-    """
-    Upload file to Gemini File API with proper async handling and retries
-    """
     import io
-    
     try:
         file_obj = io.BytesIO(raw_bytes)
         file_obj.name = name
-
-        # Upload file
         uploaded = client.files.upload(
             file=file_obj,
-            config=types.UploadFileConfig(
-                mime_type=mime_type,
-                display_name=name,
-            )
+            config=types.UploadFileConfig(mime_type=mime_type, display_name=name)
         )
-
-        # Wait for file to be ACTIVE with proper async handling
-        max_attempts = 30  # 30 seconds max
-        for attempt in range(max_attempts):
+        for _ in range(30):
             if uploaded.state.name == "ACTIVE":
                 return uploaded.uri, uploaded.name
-            
             if uploaded.state.name == "FAILED":
                 raise Exception(f"File processing failed: {name}")
-            
             await asyncio.sleep(1)
             uploaded = client.files.get(name=uploaded.name)
-        
-        # Timeout reached
-        raise Exception(f"File processing timeout for: {name}")
-        
+        raise Exception(f"File processing timeout: {name}")
     except Exception as e:
         raise Exception(f"Failed to upload {name}: {str(e)}")
 
+
 # =====================================================
-# SSE ASK ROUTE  (multimodal)
+# MAIN ASK ROUTE
 # =====================================================
 @app.post("/api/ask")
 async def ask_question(payload: dict):
@@ -119,7 +329,7 @@ async def ask_question(payload: dict):
     chapter      = (payload.get("chapter")      or "General").strip()
     question     = (payload.get("question")     or "").strip()
     model_choice = (payload.get("model")        or "t1").lower()
-    files        =  payload.get("files")        or []   # list of {name, mimeType, base64}
+    files        =  payload.get("files")        or []
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
@@ -127,127 +337,16 @@ async def ask_question(payload: dict):
     if not question and not files:
         raise HTTPException(status_code=400, detail="Question or file required")
 
-    # If no question text but files exist, add a default prompt
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # =====================================================
-    # MODEL SELECT
-    # =====================================================
-    if model_choice == "t2":
-        model_name = "gemini-3.1-pro-preview"
-    else:
-        model_name = "gemini-3.1-flash-lite-preview"
+    # ── Model selection ──
+    model_name = "gemini-3.1-pro-preview" if model_choice == "t2" else "gemini-3.1-flash-lite-preview"
 
-    # =====================================================
-    # PROMPT
-    # =====================================================
-    prompt_text = f"""
-You are an expert {board} Class {class_level} teacher.
+    # ── Build subject-specific prompt ──
+    prompt_text = build_prompt(board, class_level, subject, chapter, question)
 
-Board: {board}
-Subject: {subject}
-Chapter: {chapter}
-
-A student from Class {class_level} has asked the following question:
-
-\"\"\"{question}\"\"\"
-
-Your task is to answer strictly according to the {board} syllabus and exam pattern.
-
-REQUIREMENTS:
-- Explain the concept clearly and correctly.
-- Use only {board} Class {class_level} level methods.
-- Show all important steps and working where required (Maths, Physics, Chemistry).
-- Keep the explanation concise but conceptually strong.
-- Mention a common mistake ONLY if it is relevant.
-- Focus on how answers are expected in board exams.
-
-STRICT ANSWERING RULES (VERY IMPORTANT):
-
-1. Use PLAIN TEXT ONLY.
-   - NO Markdown, NO HTML, NO LaTeX, NO emojis
-
-2. Allowed mathematical symbols ONLY:
-   - Degrees: 30°
-   - Fractions: 1/2
-   - Equals sign: =
-   - Plus or minus: + −
-   - Square root: √
-
-2a. EQUATION NOTATION — the frontend auto-renders these, so use them exactly:
-
-   SUPERSCRIPTS — use ^ for powers, exponents, charges:
-      x^2   a^3   m^2   cm^3   10^8
-      Multi-char: use braces  →  x^{{n+1}}   Fe^{{3+}}   Cu^{{2+}}   10^{{-19}}
-      Examples:
-        x squared        →  x^2
-        10 to the -19    →  10^{{-19}}
-        Iron(III) ion    →  Fe^{{3+}}
-
-   SUBSCRIPTS — use _ for chemical formulas:
-      H_2   O_2   CO_2
-      Multi-char: use braces  →  C_{{6}}H_{{12}}O_{{6}}   Na_{{2}}SO_{{4}}
-      Examples:
-        Water            →  H_2O
-        Sulphuric acid   →  H_2SO_4
-        Glucose          →  C_{{6}}H_{{12}}O_{{6}}
-        Sodium sulphate  →  Na_2SO_4
-
-   CHEMICAL REACTION ARROW — use -> (renders as →):
-      Always balance the equation.
-      State symbols: (s) (l) (g) (aq) — plain text, no subscript needed
-      Examples:
-        2H_2 + O_2 -> 2H_2O
-        CaCO_3 -> CaO + CO_2
-        Zn + H_2SO_4 -> ZnSO_4 + H_2
-        CH_4 + 2O_2 -> CO_2 + 2H_2O
-        Cu^{{2+}} + 2OH^- -> Cu(OH)_2
-
-3. Write mathematics in NORMAL SCHOOL STYLE.
-   Example: sin 30° = 1/2
-   Also using the notation above: v^2 = u^2 + 2as   E = mc^2   KE = (1/2)mv^2
-
-4. Keep the answer:
-   - SHORT
-   - CLEAR
-   - CONCEPTUALLY DEEP
-   - STRICTLY exam-oriented
-
-5. IMPORTANT HIGHLIGHTING RULES:
-   - Highlight important formulas, definitions, or final answers
-   - Use ONLY SINGLE ASTERISKS like *this*
-   - NEVER use double asterisks **
-   - The MAIN FINAL RESULT must be inside single asterisks
-   - Examples: *v^2 = u^2 + 2as*   *H_2SO_4 is a strong dibasic acid*
-
-6. Language must be:
-   - Simple
-   - Calm
-   - Clear
-   - Suitable for Class {class_level} students
-
-7. While giving output, be friendly and conversational with students.
-
-8. BOARD ALIGNMENT: Answer ONLY what is officially taught at Class {class_level} level for {board}.
-
-9. EXAM ANSWER EXPECTATION: Frame the answer exactly how a board examiner expects it.
-
-10. STEP MARKING AWARENESS: Write steps in the correct logical order used for marking.
-
-11. DEFINITIONS RULE: Start with the exact definition in simple board language.
-
-12. FILE / IMAGE RULES:
-    - If an image is attached, carefully read and analyse it
-    - If it's a question paper, solve ALL visible questions step by step
-    - If it's a diagram, explain what it shows in exam-appropriate language
-    - If it's a PDF, treat it as a document and answer based on its content
-    - Always relate file content back to {board} Class {class_level} {subject} syllabus
-"""
-
-    # =====================================================
-    # BUILD GEMINI CONTENTS (multimodal) WITH ERROR HANDLING
-    # =====================================================
+    # ── Build multimodal contents ──
     contents = []
     uploaded_file_uris = []
     file_errors = []
@@ -259,7 +358,6 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
 
         if not b64 or not mime:
             continue
-
         if mime not in SUPPORTED_MIME_TYPES:
             file_errors.append(f"File '{name}' ({mime}) is unsupported")
             continue
@@ -271,23 +369,17 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
             continue
 
         if mime == "application/pdf":
-            # ── PDF: upload via File API with improved error handling ──
             try:
                 uri, file_name = await upload_file_to_gemini(raw_bytes, "application/pdf", name)
-                contents.append(types.Part.from_uri(
-                    uri=uri,
-                    mime_type="application/pdf"
-                ))
+                contents.append(types.Part.from_uri(uri=uri, mime_type="application/pdf"))
                 uploaded_file_uris.append(file_name)
             except Exception as e:
-                # Fallback: try inline if File API fails
                 try:
                     contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
                 except Exception:
                     file_errors.append(f"Could not process PDF '{name}': {str(e)}")
 
         elif mime == "text/plain":
-            # ── Plain text: decode and embed directly in prompt ──
             try:
                 text_content = raw_bytes.decode("utf-8", errors="replace")
                 prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
@@ -295,29 +387,23 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
                 file_errors.append(f"Could not read text file '{name}': {str(e)}")
 
         else:
-            # ── Images: inline_data (jpeg, png, gif, webp) ──
             try:
                 contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
             except Exception as e:
                 file_errors.append(f"Could not process image '{name}': {str(e)}")
 
-    # Add file errors to prompt if any
     if file_errors:
         prompt_text += "\n\n[Note: Some files could not be processed: " + "; ".join(file_errors) + "]"
 
-    # Text prompt goes last
     contents.append(types.Part.from_text(text=prompt_text))
 
-    # =====================================================
-    # STREAM GENERATOR WITH IMPROVED ERROR HANDLING
-    # =====================================================
+    # ── Stream generator ──
     async def stream():
         try:
             response_stream = client.models.generate_content_stream(
                 model=model_name,
                 contents=contents,
             )
-
             loop = asyncio.get_event_loop()
 
             def get_next():
@@ -336,42 +422,38 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
                 except StopIteration:
                     break
                 except Exception as chunk_error:
-                    # Log chunk error but try to continue
                     print(f"Chunk error: {chunk_error}")
                     if chunk_count == 0:
-                        # If no chunks sent yet, report error
                         raise chunk_error
-                    # Otherwise, just end the stream
                     break
 
             yield "event: end\ndata: done\n\n"
 
         except Exception as e:
             error_msg = str(e)
-            # Send user-friendly error message
             if "quota" in error_msg.lower():
-                yield f"event: error\ndata: API quota exceeded. Please try again later.\n\n"
+                yield "event: error\ndata: API quota exceeded. Please try again later.\n\n"
             elif "api key" in error_msg.lower():
-                yield f"event: error\ndata: API configuration error. Please contact support.\n\n"
+                yield "event: error\ndata: API configuration error. Please contact support.\n\n"
             else:
                 yield f"event: error\ndata: {error_msg}\n\n"
         finally:
-            # Cleanup uploaded files
             for file_name in uploaded_file_uris:
                 try:
                     client.files.delete(name=file_name)
                 except:
-                    pass  # Silent cleanup failure
+                    pass
 
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control":    "no-cache",
-            "Connection":       "keep-alive",
+            "Cache-Control":     "no-cache",
+            "Connection":        "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
+
 
 # =====================================================
 # LOCAL RUN
@@ -379,4 +461,3 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
-
