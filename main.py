@@ -216,10 +216,10 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
 
 5. IMPORTANT HIGHLIGHTING RULES:
    - Highlight important formulas, definitions, or final answers
-   - Use ONLY SINGLE ASTERISKS like *this*
-   - NEVER use double asterisks **
-   - The MAIN FINAL RESULT must be inside single asterisks
-   - Examples: *v^2 = u^2 + 2as*   *H_2SO_4 is a strong dibasic acid*
+   - Use ONLY DOUBLE ASTERISKS like **this**
+   - NEVER use single asterisks *
+   - The MAIN FINAL RESULT must be inside double asterisks
+   - Examples: **v^2 = u^2 + 2as**   **H_2SO_4 is a strong dibasic acid**
 
 6. Language must be:
    - Simple
