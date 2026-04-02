@@ -21,7 +21,7 @@ if not GEMINI_API_KEY:
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.1")
+app = FastAPI(title="AI Tutor Backend", version="3.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,7 +35,6 @@ app.add_middleware(
 # =====================================================
 ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
 
-# Supported MIME types Gemini can process
 SUPPORTED_MIME_TYPES = {
     "image/jpeg", "image/png", "image/gif", "image/webp",
     "application/pdf",
@@ -45,42 +44,179 @@ SUPPORTED_MIME_TYPES = {
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
-# HEALTH ROUTE
+# SUBJECT-SPECIFIC PROMPTS
+# =====================================================
+
+SUBJECT_PROMPTS = {
+    "Maths": """
+MATHS-SPECIFIC RULES:
+- Show ALL working steps clearly
+- Write equations using: x^2 for powers, fractions as a/b
+- Use ^ for exponents: x^2, x^{{n+1}}, 10^{{-3}}
+- Highlight final answers with **answer**
+- For geometry: state theorems used
+- For algebra: show each simplification step
+- For trigonometry: use sin, cos, tan with degree symbol (30°)
+- Always verify answer where possible
+""",
+
+    "Physics": """
+PHYSICS-SPECIFIC RULES:
+- State the relevant formula first
+- List given quantities with units
+- Show substitution step clearly
+- Use ^ for powers: m/s^2, kg·m^2, 10^{{-19}}
+- Include units in final answer
+- Highlight formula and final answer with **text**
+- For numericals: Given → Formula → Substitution → Answer
+- Mention SI units where relevant
+""",
+
+    "Chemistry": """
+CHEMISTRY-SPECIFIC RULES:
+- For equations: use subscripts H_2O, CO_2, Na_2SO_4
+- Multi-char subscripts: C_{{6}}H_{{12}}O_{{6}}
+- Charges as superscripts: Fe^{{3+}}, Cu^{{2+}}, OH^-
+- Reaction arrows: use -> (renders as →)
+- Always balance chemical equations
+- State symbols: (s) (l) (g) (aq) after compounds
+- Example: 2H_2 + O_2 -> 2H_2O
+- Example: CaCO_3 -> CaO + CO_2
+- Highlight important reactions/definitions with **text**
+""",
+
+    "Biology": """
+BIOLOGY-SPECIFIC RULES:
+- Use proper scientific terminology
+- Define key terms clearly
+- For diagrams: describe parts systematically
+- Mention functions along with structures
+- Use examples from the syllabus
+- Highlight definitions and key points with **text**
+- For processes: explain step-by-step in order
+""",
+
+    "English Literature": """
+ENGLISH LITERATURE-SPECIFIC RULES:
+- Reference the text/chapter specifically
+- Include relevant quotes where helpful
+- Explain themes, characters, literary devices
+- Use formal analytical language
+- Structure: Introduction → Analysis → Conclusion
+- Highlight key quotes and terms with **text**
+- Connect to broader themes when relevant
+""",
+
+    "English Grammar": """
+ENGLISH GRAMMAR-SPECIFIC RULES:
+- State the grammar rule clearly
+- Give correct and incorrect examples
+- For transformations: show step-by-step
+- For tenses: name the tense used
+- For voice/narration: show the conversion process
+- Highlight rules and correct forms with **text**
+""",
+
+    "History": """
+HISTORY & CIVICS-SPECIFIC RULES:
+- Include dates and timeline where relevant
+- Name key figures and their roles
+- Explain causes and consequences
+- For civics: quote constitutional provisions if needed
+- Structure answers chronologically when appropriate
+- Highlight important dates, names, events with **text**
+""",
+
+    "Geography": """
+GEOGRAPHY-SPECIFIC RULES:
+- Include location context where relevant
+- Use geographical terminology correctly
+- For map-based: describe positions clearly
+- Mention climate, vegetation, resources as relevant
+- Include statistical data from syllabus
+- Highlight key terms and facts with **text**
+""",
+
+    "Computer Applications": """
+COMPUTER APPLICATIONS-SPECIFIC RULES:
+- Write code in plain text, properly indented
+- For Java: use correct syntax and conventions
+- Explain logic before/after code
+- Mention output where helpful
+- For theory: define terms precisely
+- Highlight keywords, syntax, definitions with **text**
+- Variable names in camelCase for Java
+"""
+}
+
+# Default prompt for subjects not in the list
+DEFAULT_SUBJECT_PROMPT = """
+GENERAL RULES:
+- Explain concepts clearly and accurately
+- Use examples from the syllabus
+- Structure answer logically
+- Highlight important points with **text**
+"""
+
+# =====================================================
+# BASE PROMPT (common for all subjects)
+# =====================================================
+def get_base_prompt(board, class_level, subject, chapter, question):
+    return f"""You are an expert {board} Class {class_level} {subject} teacher.
+
+Board: {board} | Class: {class_level} | Subject: {subject} | Chapter: {chapter}
+
+Student's Question:
+\"\"\"{question}\"\"\"
+
+Answer strictly according to {board} syllabus and exam pattern.
+
+CORE RULES:
+1. PLAIN TEXT ONLY — no Markdown, HTML, LaTeX, emojis
+2. Use ^ for superscripts: x^2, 10^{{-19}}, Fe^{{3+}}
+3. Use _ for subscripts: H_2O, CO_2, C_{{6}}H_{{12}}O_{{6}}
+4. Use -> for arrows (renders as →)
+5. HIGHLIGHTING — VERY IMPORTANT:
+   - Wrap important formulas/answers with **double asterisks**
+   - MUST have BOTH opening ** AND closing **
+   - Correct: **x = 5** or **F = ma**
+   - WRONG: x = 5** or **x = 5 (missing one side)
+   - Keep highlights SHORT (one formula or key term at a time)
+6. Keep answer SHORT, CLEAR, EXAM-ORIENTED
+7. Be friendly and conversational
+8. Frame answer as board examiner expects
+
+FILE/IMAGE RULES:
+- Analyse any attached image/PDF carefully
+- If question paper: solve ALL visible questions
+- Relate content to {board} Class {class_level} {subject} syllabus
+"""
+
+# =====================================================
+# HEALTH ROUTES
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.1"}
+    return {"status": "running", "version": "3.2"}
 
 @app.get("/health")
 def health():
-    """Health check endpoint for monitoring"""
-    try:
-        # Quick test to verify Gemini API is accessible
-        return {
-            "status": "healthy",
-            "api_key_present": bool(GEMINI_API_KEY),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+    return {
+        "status": "healthy",
+        "api_key_present": bool(GEMINI_API_KEY),
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # =====================================================
-# IMPROVED FILE UPLOAD WITH ASYNC HANDLING
+# FILE UPLOAD HELPER
 # =====================================================
 async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
-    """
-    Upload file to Gemini File API with proper async handling and retries
-    """
     import io
     
     try:
         file_obj = io.BytesIO(raw_bytes)
         file_obj.name = name
 
-        # Upload file
         uploaded = client.files.upload(
             file=file_obj,
             config=types.UploadFileConfig(
@@ -89,8 +225,7 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
             )
         )
 
-        # Wait for file to be ACTIVE with proper async handling
-        max_attempts = 30  # 30 seconds max
+        max_attempts = 30
         for attempt in range(max_attempts):
             if uploaded.state.name == "ACTIVE":
                 return uploaded.uri, uploaded.name
@@ -101,14 +236,13 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
             await asyncio.sleep(1)
             uploaded = client.files.get(name=uploaded.name)
         
-        # Timeout reached
         raise Exception(f"File processing timeout for: {name}")
         
     except Exception as e:
         raise Exception(f"Failed to upload {name}: {str(e)}")
 
 # =====================================================
-# SSE ASK ROUTE  (multimodal)
+# MAIN ASK ROUTE
 # =====================================================
 @app.post("/api/ask")
 async def ask_question(payload: dict):
@@ -119,7 +253,7 @@ async def ask_question(payload: dict):
     chapter      = (payload.get("chapter")      or "General").strip()
     question     = (payload.get("question")     or "").strip()
     model_choice = (payload.get("model")        or "t1").lower()
-    files        =  payload.get("files")        or []   # list of {name, mimeType, base64}
+    files        =  payload.get("files")        or []
 
     if board not in ALLOWED_BOARDS:
         raise HTTPException(status_code=400, detail="Invalid board")
@@ -127,7 +261,6 @@ async def ask_question(payload: dict):
     if not question and not files:
         raise HTTPException(status_code=400, detail="Question or file required")
 
-    # If no question text but files exist, add a default prompt
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
@@ -140,113 +273,16 @@ async def ask_question(payload: dict):
         model_name = "gemini-3.1-flash-lite-preview"
 
     # =====================================================
-    # PROMPT
+    # BUILD PROMPT: Base + Subject-specific
     # =====================================================
-    prompt_text = f"""
-You are an expert {board} Class {class_level} teacher.
-
-Board: {board}
-Subject: {subject}
-Chapter: {chapter}
-
-A student from Class {class_level} has asked the following question:
-
-\"\"\"{question}\"\"\"
-
-Your task is to answer strictly according to the {board} syllabus and exam pattern.
-
-REQUIREMENTS:
-- Explain the concept clearly and correctly.
-- Use only {board} Class {class_level} level methods.
-- Show all important steps and working where required (Maths, Physics, Chemistry).
-- Keep the explanation concise but conceptually strong.
-- Mention a common mistake ONLY if it is relevant.
-- Focus on how answers are expected in board exams.
-
-STRICT ANSWERING RULES (VERY IMPORTANT):
-
-1. Use PLAIN TEXT ONLY.
-   - NO Markdown, NO HTML, NO LaTeX, NO emojis
-
-2. Allowed mathematical symbols ONLY:
-   - Degrees: 30°
-   - Fractions: 1/2
-   - Equals sign: =
-   - Plus or minus: + −
-   - Square root: √
-
-2a. EQUATION NOTATION — the frontend auto-renders these, so use them exactly:
-
-   SUPERSCRIPTS — use ^ for powers, exponents, charges:
-      x^2   a^3   m^2   cm^3   10^8
-      Multi-char: use braces  →  x^{{n+1}}   Fe^{{3+}}   Cu^{{2+}}   10^{{-19}}
-      Examples:
-        x squared        →  x^2
-        10 to the -19    →  10^{{-19}}
-        Iron(III) ion    →  Fe^{{3+}}
-
-   SUBSCRIPTS — use _ for chemical formulas:
-      H_2   O_2   CO_2
-      Multi-char: use braces  →  C_{{6}}H_{{12}}O_{{6}}   Na_{{2}}SO_{{4}}
-      Examples:
-        Water            →  H_2O
-        Sulphuric acid   →  H_2SO_4
-        Glucose          →  C_{{6}}H_{{12}}O_{{6}}
-        Sodium sulphate  →  Na_2SO_4
-
-   CHEMICAL REACTION ARROW — use -> (renders as →):
-      Always balance the equation.
-      State symbols: (s) (l) (g) (aq) — plain text, no subscript needed
-      Examples:
-        2H_2 + O_2 -> 2H_2O
-        CaCO_3 -> CaO + CO_2
-        Zn + H_2SO_4 -> ZnSO_4 + H_2
-        CH_4 + 2O_2 -> CO_2 + 2H_2O
-        Cu^{{2+}} + 2OH^- -> Cu(OH)_2
-
-3. Write mathematics in NORMAL SCHOOL STYLE.
-   Example: sin 30° = 1/2
-   Also using the notation above: v^2 = u^2 + 2as   E = mc^2   KE = (1/2)mv^2
-
-4. Keep the answer:
-   - SHORT
-   - CLEAR
-   - CONCEPTUALLY DEEP
-   - STRICTLY exam-oriented
-
-5. IMPORTANT HIGHLIGHTING RULES:
-   - Highlight important formulas, definitions, or final answers
-   - Use ONLY DOUBLE ASTERISKS like **this**
-   - NEVER use single asterisks *
-   - The MAIN FINAL RESULT must be inside double asterisks
-   - Examples: **v^2 = u^2 + 2as**   **H_2SO_4 is a strong dibasic acid**
-
-6. Language must be:
-   - Simple
-   - Calm
-   - Clear
-   - Suitable for Class {class_level} students
-
-7. While giving output, be friendly and conversational with students.
-
-8. BOARD ALIGNMENT: Answer ONLY what is officially taught at Class {class_level} level for {board}.
-
-9. EXAM ANSWER EXPECTATION: Frame the answer exactly how a board examiner expects it.
-
-10. STEP MARKING AWARENESS: Write steps in the correct logical order used for marking.
-
-11. DEFINITIONS RULE: Start with the exact definition in simple board language.
-
-12. FILE / IMAGE RULES:
-    - If an image is attached, carefully read and analyse it
-    - If it's a question paper, solve ALL visible questions step by step
-    - If it's a diagram, explain what it shows in exam-appropriate language
-    - If it's a PDF, treat it as a document and answer based on its content
-    - Always relate file content back to {board} Class {class_level} {subject} syllabus
-"""
+    prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
+    
+    # Add subject-specific prompt
+    subject_prompt = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
+    prompt_text += "\n" + subject_prompt
 
     # =====================================================
-    # BUILD GEMINI CONTENTS (multimodal) WITH ERROR HANDLING
+    # PROCESS FILES
     # =====================================================
     contents = []
     uploaded_file_uris = []
@@ -271,7 +307,6 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
             continue
 
         if mime == "application/pdf":
-            # ── PDF: upload via File API with improved error handling ──
             try:
                 uri, file_name = await upload_file_to_gemini(raw_bytes, "application/pdf", name)
                 contents.append(types.Part.from_uri(
@@ -280,14 +315,12 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
                 ))
                 uploaded_file_uris.append(file_name)
             except Exception as e:
-                # Fallback: try inline if File API fails
                 try:
                     contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
                 except Exception:
                     file_errors.append(f"Could not process PDF '{name}': {str(e)}")
 
         elif mime == "text/plain":
-            # ── Plain text: decode and embed directly in prompt ──
             try:
                 text_content = raw_bytes.decode("utf-8", errors="replace")
                 prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
@@ -295,21 +328,18 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
                 file_errors.append(f"Could not read text file '{name}': {str(e)}")
 
         else:
-            # ── Images: inline_data (jpeg, png, gif, webp) ──
             try:
                 contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
             except Exception as e:
                 file_errors.append(f"Could not process image '{name}': {str(e)}")
 
-    # Add file errors to prompt if any
     if file_errors:
         prompt_text += "\n\n[Note: Some files could not be processed: " + "; ".join(file_errors) + "]"
 
-    # Text prompt goes last
     contents.append(types.Part.from_text(text=prompt_text))
 
     # =====================================================
-    # STREAM GENERATOR WITH IMPROVED ERROR HANDLING
+    # STREAM RESPONSE
     # =====================================================
     async def stream():
         try:
@@ -336,19 +366,15 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
                 except StopIteration:
                     break
                 except Exception as chunk_error:
-                    # Log chunk error but try to continue
                     print(f"Chunk error: {chunk_error}")
                     if chunk_count == 0:
-                        # If no chunks sent yet, report error
                         raise chunk_error
-                    # Otherwise, just end the stream
                     break
 
             yield "event: end\ndata: done\n\n"
 
         except Exception as e:
             error_msg = str(e)
-            # Send user-friendly error message
             if "quota" in error_msg.lower():
                 yield f"event: error\ndata: API quota exceeded. Please try again later.\n\n"
             elif "api key" in error_msg.lower():
@@ -356,12 +382,11 @@ STRICT ANSWERING RULES (VERY IMPORTANT):
             else:
                 yield f"event: error\ndata: {error_msg}\n\n"
         finally:
-            # Cleanup uploaded files
             for file_name in uploaded_file_uris:
                 try:
                     client.files.delete(name=file_name)
                 except:
-                    pass  # Silent cleanup failure
+                    pass
 
     return StreamingResponse(
         stream(),
