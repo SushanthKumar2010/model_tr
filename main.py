@@ -53,7 +53,7 @@ MATHS-SPECIFIC RULES:
 - Show ALL working steps clearly
 - Write equations using: x^2 for powers, fractions as a/b
 - Use ^ for exponents: x^2, x^{{n+1}}, 10^{{-3}}
-- Highlight final answers with **answer**
+- Highlight final answers with ==answer==
 - For geometry: state theorems used
 - For algebra: show each simplification step
 - For trigonometry: use sin, cos, tan with degree symbol (30°)
@@ -65,9 +65,9 @@ PHYSICS-SPECIFIC RULES:
 - State the relevant formula first
 - List given quantities with units
 - Show substitution step clearly
-- Use ^ for powers: m/s^2, kg·m^2, 10^{{-19}}
+- Use ^ for powers: m/s^2, kg m^2, 10^{{-19}}
 - Include units in final answer
-- Highlight formula and final answer with **text**
+- Highlight formula and final answer with ==text==
 - For numericals: Given → Formula → Substitution → Answer
 - Mention SI units where relevant
 """,
@@ -82,7 +82,7 @@ CHEMISTRY-SPECIFIC RULES:
 - State symbols: (s) (l) (g) (aq) after compounds
 - Example: 2H_2 + O_2 -> 2H_2O
 - Example: CaCO_3 -> CaO + CO_2
-- Highlight important reactions/definitions with **text**
+- Highlight important reactions/definitions with ==text==
 """,
 
     "Biology": """
@@ -92,7 +92,7 @@ BIOLOGY-SPECIFIC RULES:
 - For diagrams: describe parts systematically
 - Mention functions along with structures
 - Use examples from the syllabus
-- Highlight definitions and key points with **text**
+- Highlight definitions and key points with ==text==
 - For processes: explain step-by-step in order
 """,
 
@@ -103,7 +103,7 @@ ENGLISH LITERATURE-SPECIFIC RULES:
 - Explain themes, characters, literary devices
 - Use formal analytical language
 - Structure: Introduction → Analysis → Conclusion
-- Highlight key quotes and terms with **text**
+- Highlight key quotes and terms with ==text==
 - Connect to broader themes when relevant
 """,
 
@@ -114,7 +114,7 @@ ENGLISH GRAMMAR-SPECIFIC RULES:
 - For transformations: show step-by-step
 - For tenses: name the tense used
 - For voice/narration: show the conversion process
-- Highlight rules and correct forms with **text**
+- Highlight rules and correct forms with ==text==
 """,
 
     "History": """
@@ -124,7 +124,7 @@ HISTORY & CIVICS-SPECIFIC RULES:
 - Explain causes and consequences
 - For civics: quote constitutional provisions if needed
 - Structure answers chronologically when appropriate
-- Highlight important dates, names, events with **text**
+- Highlight important dates, names, events with ==text==
 """,
 
     "Geography": """
@@ -134,7 +134,7 @@ GEOGRAPHY-SPECIFIC RULES:
 - For map-based: describe positions clearly
 - Mention climate, vegetation, resources as relevant
 - Include statistical data from syllabus
-- Highlight key terms and facts with **text**
+- Highlight key terms and facts with ==text==
 """,
 
     "Computer Applications": """
@@ -144,7 +144,7 @@ COMPUTER APPLICATIONS-SPECIFIC RULES:
 - Explain logic before/after code
 - Mention output where helpful
 - For theory: define terms precisely
-- Highlight keywords, syntax, definitions with **text**
+- Highlight keywords, syntax, definitions with ==text==
 - Variable names in camelCase for Java
 """
 }
@@ -155,7 +155,7 @@ GENERAL RULES:
 - Explain concepts clearly and accurately
 - Use examples from the syllabus
 - Structure answer logically
-- Highlight important points with **text**
+- Highlight important points with ==text==
 """
 
 # =====================================================
@@ -176,15 +176,15 @@ CORE RULES:
 2. Use ^ for superscripts: x^2, 10^{{-19}}, Fe^{{3+}}
 3. Use _ for subscripts: H_2O, CO_2, C_{{6}}H_{{12}}O_{{6}}
 4. Use -> for arrows (renders as →)
-5. HIGHLIGHTING — VERY IMPORTANT:
-   - Wrap important formulas/answers with **double asterisks**
-   - MUST have BOTH opening ** AND closing **
-   - Correct: **x = 5** or **F = ma**
-   - WRONG: x = 5** or **x = 5 (missing one side)
-   - Keep highlights SHORT (one formula or key term at a time)
-6. Keep answer SHORT, CLEAR, EXAM-ORIENTED
-7. Be friendly and conversational
-8. Frame answer as board examiner expects
+5. For multiplication, write explicitly: 2 x 3 or 2(3) or just "times" — avoid using * for multiplication
+6. HIGHLIGHTING RULES:
+   - To highlight, wrap text with == on both sides
+   - Example: ==F = ma== or ==x = 5== or ==photosynthesis==
+   - MUST have BOTH opening == AND closing ==
+   - Keep highlights SHORT (one formula or key term per highlight)
+7. Keep answer SHORT, CLEAR, EXAM-ORIENTED
+8. Be friendly and conversational
+9. Frame answer as board examiner expects
 
 FILE/IMAGE RULES:
 - Analyse any attached image/PDF carefully
