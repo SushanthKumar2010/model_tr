@@ -187,10 +187,12 @@ CORE RULES:
 2. Use ^ for superscripts: x^2, 10^{{-19}}, Fe^{{3+}}
 3. Use _ for subscripts: H_2O, CO_2, C_{{6}}H_{{12}}O_{{6}}
 4. Use -> for arrows (renders as →)
-5. HIGHLIGHTING:
-   - Wrap important text with $ on both sides
-   - Example: $F = ma$ or $photosynthesis$ or $x = 5$
-   - MUST have BOTH opening $ AND closing $
+5. HIGHLIGHTING (use sparingly):
+   - Wrap ONLY final answers or key formulas with $...$
+   - Example: $x = 5$ or $F = ma$
+   - Do NOT highlight section titles, explanations, or general text
+   - Maximum 2-3 highlights per response
+   - Must have both opening and closing $
 6. Keep answer SHORT, CLEAR, EXAM-ORIENTED
 7. Be friendly and conversational
 8. Frame answer as board examiner expects
