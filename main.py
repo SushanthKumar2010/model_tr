@@ -49,124 +49,99 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 SUBJECT_PROMPTS = {
     "Maths": """
-MATHS-SPECIFIC RULES:
-- Show ALL working steps clearly
-- Write equations using: x^2 for powers, fractions as a/b
-- Use ^ for exponents: x^2, x^{{n+1}}, 10^{{-3}}
-- Highlight final answers with $answer$
-- For geometry: state theorems used
-- For algebra: show each simplification step
-- For trigonometry: use sin, cos, tan with degree symbol (30°)
-- Always verify answer where possible
+MATHS RULES:
+- Write sqrt(x) NOT \\sqrt{{x}}
+- Write pi NOT \\pi
+- Write theta NOT \\theta  
+- Write x^2 for squares, x^3 for cubes
+- Write fractions as (a+b)/c NOT \\frac
+- Show all working steps
+- Highlight only final answer: $x = 5$
 """,
 
     "Physics": """
-PHYSICS-SPECIFIC RULES:
-- State the relevant formula first
-- List given quantities with units
-- Show substitution step clearly
-- Use ^ for powers: m/s^2, kg m^2, 10^{{-19}}
-- Include units in final answer
-- Highlight formula and final answer with $text$
-- For numericals: Given → Formula → Substitution → Answer
-- Mention SI units where relevant
+PHYSICS RULES:
+- State formula first, then substitute values
+- Write units clearly: m/s^2, kg, N
+- Format: Given → Formula → Calculation → Answer
+- Highlight only final answer with units: $v = 20 m/s$
 """,
 
     "Chemistry": """
-CHEMISTRY-SPECIFIC RULES:
-- For equations: use subscripts H_2O, CO_2, Na_2SO_4
-- Multi-char subscripts: C_{{6}}H_{{12}}O_{{6}}
-- Charges as superscripts: Fe^{{3+}}, Cu^{{2+}}, OH^-
-- Reaction arrows: use -> (renders as →)
-- Always balance chemical equations
-- State symbols: (s) (l) (g) (aq) after compounds
-- Example: 2H_2 + O_2 -> 2H_2O
-- Example: CaCO_3 -> CaO + CO_2
-- Highlight important reactions/definitions with $text$
+CHEMISTRY RULES:
+- Chemical formulas: H_2O, CO_2, H_2SO_4
+- Reactions use ->: 2H_2 + O_2 -> 2H_2O
+- State symbols in brackets: (s), (l), (g), (aq)
+- Balance all equations
+- Highlight key equations: $2Na + 2H_2O -> 2NaOH + H_2$
 """,
 
     "Biology": """
-BIOLOGY-SPECIFIC RULES:
-- Use proper scientific terminology
+BIOLOGY RULES:
+- Use proper scientific terms
 - Define key terms clearly
-- For diagrams: describe parts systematically
-- Mention functions along with structures
-- Use examples from the syllabus
-- Highlight definitions and key points with $text$
-- For processes: explain step-by-step in order
+- Explain processes step-by-step
+- Highlight only key definitions: $Photosynthesis is the process...$
 """,
 
     "English Literature": """
-ENGLISH LITERATURE-SPECIFIC RULES:
-- Reference the text/chapter specifically
-- Include relevant quotes where helpful
-- Explain themes, characters, literary devices
-- Use formal analytical language
+ENGLISH LITERATURE RULES:
+- Reference text/chapter specifically
+- Use quotes where relevant
+- Explain themes and literary devices
 - Structure: Introduction → Analysis → Conclusion
-- Highlight key quotes and terms with $text$
-- Connect to broader themes when relevant
 """,
 
     "English Grammar": """
-ENGLISH GRAMMAR-SPECIFIC RULES:
-- State the grammar rule clearly
-- Give correct and incorrect examples
-- For transformations: show step-by-step
-- For tenses: name the tense used
-- For voice/narration: show the conversion process
-- Highlight rules and correct forms with $text$
+ENGLISH GRAMMAR RULES:
+- State grammar rule clearly
+- Show correct and incorrect examples
+- For transformations, show step-by-step
+- Highlight the correct form: $The letter was written by him$
 """,
 
     "History": """
-HISTORY & CIVICS-SPECIFIC RULES:
-- Include dates and timeline where relevant
-- Name key figures and their roles
-- Explain causes and consequences
-- For civics: quote constitutional provisions if needed
-- Structure answers chronologically when appropriate
-- Highlight important dates, names, events with $text$
+HISTORY & CIVICS RULES:
+- Include relevant dates
+- Name key figures and roles
+- Explain causes and effects
+- Structure chronologically
+- Highlight key facts: $The treaty was signed in 1947$
 """,
 
     "Economics": """
-ECONOMICS-SPECIFIC RULES:
-- Define economic terms precisely
-- Use real-world examples from Indian economy where relevant
-- For numerical problems: show formula and substitution
-- Explain concepts like demand, supply, GDP, inflation clearly
-- Use graphs descriptions when needed (describe axes, curves, shifts)
-- Highlight key definitions, formulas, and concepts with $text$
-- Connect theory to practical applications
+ECONOMICS RULES:
+- Define terms precisely
+- Use Indian economy examples
+- For numericals: Formula → Substitution → Answer
+- Describe graphs in words (axes, curves, shifts)
+- Highlight formulas: $GDP = C + I + G + (X-M)$
 """,
 
     "Geography": """
-GEOGRAPHY-SPECIFIC RULES:
-- Include location context where relevant
-- Use geographical terminology correctly
-- For map-based: describe positions clearly
-- Mention climate, vegetation, resources as relevant
-- Include statistical data from syllabus
-- Highlight key terms and facts with $text$
+GEOGRAPHY RULES:
+- Include location context
+- Use geographical terms correctly
+- Mention climate, vegetation, resources
+- Include statistics from syllabus
 """,
 
     "Computer Applications": """
-COMPUTER APPLICATIONS-SPECIFIC RULES:
-- Write code in plain text, properly indented
-- For Java: use correct syntax and conventions
+COMPUTER APPLICATIONS RULES:
+- Write code in plain text, indented properly
+- Use correct Java syntax
 - Explain logic before/after code
-- Mention output where helpful
-- For theory: define terms precisely
-- Highlight keywords, syntax, definitions with $text$
-- Variable names in camelCase for Java
+- Use camelCase for variables
+- Highlight syntax: $int x = 5;$
 """
 }
 
 # Default prompt for subjects not in the list
 DEFAULT_SUBJECT_PROMPT = """
 GENERAL RULES:
-- Explain concepts clearly and accurately
-- Use examples from the syllabus
-- Structure answer logically
-- Highlight important points with $text$
+- Explain clearly and accurately
+- Use syllabus examples
+- Highlight only final answers: $answer$
 """
 
 # =====================================================
@@ -180,27 +155,40 @@ Board: {board} | Class: {class_level} | Subject: {subject} | Chapter: {chapter}
 Student's Question:
 \"\"\"{question}\"\"\"
 
-Answer strictly according to {board} syllabus and exam pattern.
+CRITICAL FORMATTING RULES — FOLLOW EXACTLY:
 
-CORE RULES:
-1. PLAIN TEXT ONLY — no Markdown, HTML, LaTeX, emojis
-2. Use ^ for superscripts: x^2, 10^{{-19}}, Fe^{{3+}}
-3. Use _ for subscripts: H_2O, CO_2, C_{{6}}H_{{12}}O_{{6}}
-4. Use -> for arrows (renders as →)
-5. HIGHLIGHTING (use sparingly):
-   - Wrap ONLY final answers or key formulas with $...$
-   - Example: $x = 5$ or $F = ma$
-   - Do NOT highlight section titles, explanations, or general text
-   - Maximum 2-3 highlights per response
-   - Must have both opening and closing $
-6. Keep answer SHORT, CLEAR, EXAM-ORIENTED
-7. Be friendly and conversational
-8. Frame answer as board examiner expects
+BANNED (NEVER USE):
+- NO LaTeX: no \\frac, \\sqrt, \\pm, \\theta, \\pi, \\sin, \\cos, \\tan, \\times, \\div, \\cdot, \\neq, \\leq, \\geq, \\infty, \\sum, \\int, \\alpha, \\beta, \\gamma, \\delta
+- NO Markdown: no *, **, #, ##, `, ```
+- NO HTML tags
+- NO emojis
 
-FILE/IMAGE RULES:
-- Analyse any attached image/PDF carefully
-- If question paper: solve ALL visible questions
-- Relate content to {board} Class {class_level} {subject} syllabus
+REQUIRED FORMAT:
+- Write theta as: theta
+- Write pi as: pi
+- Write plus/minus as: +/-
+- Write square root as: sqrt(x)
+- Write fractions as: (a + b) / 2 or a/b
+- Write multiplication as: 2 x 3 or 2(3) or ab
+- Write powers as: x^2, x^3, a^n (caret symbol)
+- Write subscripts as: a_1, x_2, H_2O (underscore)
+- Write chemical arrows as: -> (becomes →)
+
+HIGHLIGHTING:
+- To highlight a formula, wrap it with $ on each side
+- Example: The answer is $x = 5$
+- Only highlight FINAL ANSWERS, not everything
+- Maximum 1-2 highlights per section
+
+ANSWERING STYLE:
+- Be friendly and conversational
+- Keep it SHORT and CLEAR
+- Focus on {board} Class {class_level} exam pattern
+- Show step-by-step working for numericals
+
+IMAGE/FILE HANDLING:
+- If image attached, read and solve all questions
+- Match {board} Class {class_level} {subject} syllabus
 """
 
 # =====================================================
