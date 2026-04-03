@@ -49,146 +49,80 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 SUBJECT_PROMPTS = {
     "Maths": """
-MATHS RULES:
-- Write sqrt(x) NOT \\sqrt{{x}}
-- Write pi NOT \\pi
-- Write theta NOT \\theta  
-- Write x^2 for squares, x^3 for cubes
-- Write fractions as (a+b)/c NOT \\frac
-- Show all working steps
-- Highlight only final answer: $x = 5$
+Show working steps. Highlight final answer: $x = 5$
 """,
 
     "Physics": """
-PHYSICS RULES:
-- State formula first, then substitute values
-- Write units clearly: m/s^2, kg, N
-- Format: Given → Formula → Calculation → Answer
-- Highlight only final answer with units: $v = 20 m/s$
+Format: Given -> Formula -> Calculation -> $Answer with units$
+Highlight key formulas and definitions.
 """,
 
     "Chemistry": """
-CHEMISTRY RULES:
-- Chemical formulas: H_2O, CO_2, H_2SO_4
-- Reactions use ->: 2H_2 + O_2 -> 2H_2O
-- State symbols in brackets: (s), (l), (g), (aq)
-- Balance all equations
-- Highlight key equations: $2Na + 2H_2O -> 2NaOH + H_2$
+Balance equations. Use -> for reactions. Example: 2H_2 + O_2 -> 2H_2O
+Highlight important reactions and definitions.
 """,
 
     "Biology": """
-BIOLOGY RULES:
-- Use proper scientific terms
-- Define key terms clearly
-- Explain processes step-by-step
-- Highlight only key definitions: $Photosynthesis is the process...$
+Highlight key definitions: $Mitosis is the process of cell division$
+Explain processes step by step.
 """,
 
     "English Literature": """
-ENGLISH LITERATURE RULES:
-- Reference text/chapter specifically
-- Use quotes where relevant
-- Explain themes and literary devices
-- Structure: Introduction → Analysis → Conclusion
+Reference the text. Highlight key themes: $The poem explores the theme of loss and longing$
 """,
 
     "English Grammar": """
-ENGLISH GRAMMAR RULES:
-- State grammar rule clearly
-- Show correct and incorrect examples
-- For transformations, show step-by-step
-- Highlight the correct form: $The letter was written by him$
+State the rule. Highlight correct forms: $The passive voice is: The cake was eaten by him$
 """,
 
     "History": """
-HISTORY & CIVICS RULES:
-- Include relevant dates
-- Name key figures and roles
-- Explain causes and effects
-- Structure chronologically
-- Highlight key facts: $The treaty was signed in 1947$
+Include dates. Highlight key facts: $The French Revolution began in 1789$
 """,
 
     "Economics": """
-ECONOMICS RULES:
-- Define terms precisely
-- Use Indian economy examples
-- For numericals: Formula → Substitution → Answer
-- Describe graphs in words (axes, curves, shifts)
-- Highlight formulas: $GDP = C + I + G + (X-M)$
+Define terms. Highlight definitions: $GDP is the total value of goods and services produced$
 """,
 
     "Geography": """
-GEOGRAPHY RULES:
-- Include location context
-- Use geographical terms correctly
-- Mention climate, vegetation, resources
-- Include statistics from syllabus
+Include location context. Highlight key facts: $The Himalayas are young fold mountains$
 """,
 
     "Computer Applications": """
-COMPUTER APPLICATIONS RULES:
-- Write code in plain text, indented properly
-- Use correct Java syntax
-- Explain logic before/after code
-- Use camelCase for variables
-- Highlight syntax: $int x = 5;$
+Write code in plain text. Highlight syntax: $int x = 5;$
 """
 }
 
 # Default prompt for subjects not in the list
 DEFAULT_SUBJECT_PROMPT = """
-GENERAL RULES:
-- Explain clearly and accurately
-- Use syllabus examples
-- Highlight only final answers: $answer$
+Explain clearly. Highlight key points with $...$
 """
 
 # =====================================================
 # BASE PROMPT (common for all subjects)
 # =====================================================
 def get_base_prompt(board, class_level, subject, chapter, question):
-    return f"""You are an expert {board} Class {class_level} {subject} teacher.
+    return f"""You are a {board} Class {class_level} {subject} teacher.
 
-Board: {board} | Class: {class_level} | Subject: {subject} | Chapter: {chapter}
+Student asked: \"\"\"{question}\"\"\"
 
-Student's Question:
-\"\"\"{question}\"\"\"
+FORMATTING RULES:
+- Plain text only. No LaTeX, no Markdown, no HTML.
+- Powers: use ^ like x^2, a^3, r^2
+- Subscripts: use _ like H_2O, a_n, x_1  
+- Arrows: use -> for reactions
+- Greek letters: write as words (pi, theta, alpha)
+- Square root: write as sqrt() like sqrt(2)
+- Fractions: write as a/b or (a+b)/c
+- Multiply: use x or just write together (2 x pi x r or 2pir)
 
-CRITICAL FORMATTING RULES — FOLLOW EXACTLY:
+HIGHLIGHTING with $ signs:
+- Wrap KEY formulas: $x = (-b + sqrt(b^2 - 4ac)) / 2a$
+- Wrap KEY definitions: $Photosynthesis is the process by which plants make food using sunlight$
+- Wrap FINAL answers: $The answer is 25 cm$
+- Wrap IMPORTANT points: $This is a very common exam question$
+- Use sparingly - only the most important stuff
 
-BANNED (NEVER USE):
-- NO LaTeX: no \\frac, \\sqrt, \\pm, \\theta, \\pi, \\sin, \\cos, \\tan, \\times, \\div, \\cdot, \\neq, \\leq, \\geq, \\infty, \\sum, \\int, \\alpha, \\beta, \\gamma, \\delta
-- NO Markdown: no *, **, #, ##, `, ```
-- NO HTML tags
-- NO emojis
-
-REQUIRED FORMAT:
-- Write theta as: theta
-- Write pi as: pi
-- Write plus/minus as: +/-
-- Write square root as: sqrt(x)
-- Write fractions as: (a + b) / 2 or a/b
-- Write multiplication as: 2 x 3 or 2(3) or ab
-- Write powers as: x^2, x^3, a^n (caret symbol)
-- Write subscripts as: a_1, x_2, H_2O (underscore)
-- Write chemical arrows as: -> (becomes →)
-
-HIGHLIGHTING:
-- To highlight a formula, wrap it with $ on each side
-- Example: The answer is $x = 5$
-- Only highlight FINAL ANSWERS, not everything
-- Maximum 1-2 highlights per section
-
-ANSWERING STYLE:
-- Be friendly and conversational
-- Keep it SHORT and CLEAR
-- Focus on {board} Class {class_level} exam pattern
-- Show step-by-step working for numericals
-
-IMAGE/FILE HANDLING:
-- If image attached, read and solve all questions
-- Match {board} Class {class_level} {subject} syllabus
+Keep answer short, clear, exam-focused for {board} Class {class_level}.
 """
 
 # =====================================================
