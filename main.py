@@ -3,6 +3,8 @@ import asyncio
 import json
 import base64
 import time
+import hmac
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -30,6 +32,10 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
 if not TURNSTILE_SECRET_KEY:
     raise RuntimeError("TURNSTILE_SECRET_KEY environment variable not set")
+
+# Supabase JWT secret — used to verify token signatures
+# Get from: Supabase Dashboard → Settings → API → JWT Secret
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 # =====================================================
 # APP INIT
@@ -248,11 +254,19 @@ async def add_tokens(user_id: str, count: int) -> list[int]:
 # AUTH HELPERS
 # =====================================================
 
+def _b64url_decode(s: str) -> bytes:
+    """Decode a base64url string (no padding required)."""
+    s += "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s)
+
+
 def extract_user_id(request: Request) -> str | None:
     """
-    Extracts Supabase user ID from the Authorization header.
-    Header: "Bearer <supabase_jwt>"
-    Decodes JWT payload without signature verification (just reads sub claim).
+    Extracts and VERIFIES a Supabase JWT from the Authorization header.
+    - Verifies the HMAC-SHA256 signature using SUPABASE_JWT_SECRET
+    - Checks token expiry
+    - Returns the user ID (sub claim) only if the token is valid
+    Falls back to unverified decode if SUPABASE_JWT_SECRET is not set (dev mode).
     """
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -261,13 +275,41 @@ def extract_user_id(request: Request) -> str | None:
     token = auth_header.split(" ", 1)[1]
 
     try:
-        payload_b64 = token.split(".")[1]
-        padding = 4 - len(payload_b64) % 4
-        if padding != 4:
-            payload_b64 += "=" * padding
-        payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+
+        header_b64, payload_b64, sig_b64 = parts
+
+        # ── Signature verification (if secret is configured) ──
+        if SUPABASE_JWT_SECRET:
+            # Reconstruct the signing input
+            signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+            expected_sig = hmac.new(
+                SUPABASE_JWT_SECRET.encode("utf-8"),
+                signing_input,
+                hashlib.sha256,
+            ).digest()
+            actual_sig = _b64url_decode(sig_b64)
+
+            # Use hmac.compare_digest to prevent timing attacks
+            if not hmac.compare_digest(expected_sig, actual_sig):
+                print("[JWT] Signature verification FAILED — token rejected")
+                return None
+
+        # ── Decode payload ──
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+
+        # ── Expiry check ──
+        exp = payload.get("exp")
+        if exp and datetime.now(timezone.utc).timestamp() > exp:
+            print("[JWT] Token expired — rejected")
+            return None
+
         return payload.get("sub")
-    except Exception:
+
+    except Exception as e:
+        print(f"[JWT] Error: {e}")
         return None
 
 
