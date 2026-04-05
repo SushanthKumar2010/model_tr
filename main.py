@@ -38,7 +38,7 @@ app = FastAPI(title="AI Tutor Backend", version="3.5")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://teengro.in", "https://teengro.vercel.app", "http://localhost", "http://localhost:3000", "http://127.0.0.1"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
