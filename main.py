@@ -2,9 +2,11 @@ import os
 import asyncio
 import json
 import base64
-from datetime import datetime
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -21,7 +23,7 @@ if not GEMINI_API_KEY:
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.2")
+app = FastAPI(title="AI Tutor Backend", version="3.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +31,174 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# =====================================================
+# RATE LIMITER (per IP, per endpoint)
+# =====================================================
+
+class RateLimiter:
+    """
+    Simple in-memory rate limiter. Tracks requests per IP per endpoint.
+    Resets automatically after the window expires.
+    """
+
+    def __init__(self):
+        self._store: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
+        now = time.time()
+        self._store[key] = [t for t in self._store[key] if now - t < window_seconds]
+
+        if len(self._store[key]) >= max_requests:
+            oldest = self._store[key][0]
+            retry_after = int(window_seconds - (now - oldest)) + 1
+            return False, retry_after
+
+        self._store[key].append(now)
+        return True, 0
+
+    def get_ip(self, request: Request) -> str:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+
+limiter = RateLimiter()
+
+LIMITS = {
+    "ask"            : (15, 60),    # 15 AI queries per minute per IP
+    "generate_image" : (5,  60),    # 5 image generations per minute per IP
+    "login"          : (5,  900),   # 5 attempts per 15 minutes per IP
+    "signup"         : (3,  3600),  # 3 signups per hour per IP
+    "reset_password" : (3,  3600),  # 3 resets per hour per IP
+}
+
+def check_rate_limit(request: Request, endpoint: str):
+    ip = limiter.get_ip(request)
+    max_req, window = LIMITS[endpoint]
+    allowed, retry_after = limiter.is_allowed(f"{endpoint}:{ip}", max_req, window)
+
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Too many requests. Please slow down.",
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+
+# =====================================================
+# DAILY TOKEN TRACKER (per Supabase user)
+# =====================================================
+
+DAILY_TOKEN_LIMIT = 50_000      # tokens per user per day
+WARNING_THRESHOLDS = [50, 75, 90]  # warn at these % of daily limit
+
+class DailyTokenTracker:
+    """
+    Tracks token usage per Supabase user ID, resets at UTC midnight.
+
+    Storage format:
+    {
+        "user_id": {
+            "date": "2026-04-05",      # UTC date — resets when this changes
+            "tokens_used": 12400,
+            "warned_at": [50, 75]      # thresholds already notified
+        }
+    }
+
+    Note: In-memory only — resets if Render restarts.
+    To persist across restarts, write tokens_used to a Supabase table.
+    """
+
+    def __init__(self):
+        self._store: dict[str, dict] = {}
+
+    def _today(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _get_record(self, user_id: str) -> dict:
+        today = self._today()
+        record = self._store.get(user_id)
+
+        # New user or new UTC day — reset
+        if not record or record["date"] != today:
+            self._store[user_id] = {
+                "date": today,
+                "tokens_used": 0,
+                "warned_at": [],
+            }
+
+        return self._store[user_id]
+
+    def get_usage(self, user_id: str) -> dict:
+        record = self._get_record(user_id)
+        tokens_used = record["tokens_used"]
+        percent = round((tokens_used / DAILY_TOKEN_LIMIT) * 100, 1)
+
+        return {
+            "tokens_used": tokens_used,
+            "tokens_limit": DAILY_TOKEN_LIMIT,
+            "tokens_remaining": max(0, DAILY_TOKEN_LIMIT - tokens_used),
+            "percent_used": percent,
+        }
+
+    def is_limit_reached(self, user_id: str) -> bool:
+        record = self._get_record(user_id)
+        return record["tokens_used"] >= DAILY_TOKEN_LIMIT
+
+    def add_tokens(self, user_id: str, count: int) -> list[int]:
+        """
+        Adds tokens used for a request.
+        Returns list of NEW warning thresholds just crossed e.g. [50] or [75, 90].
+        """
+        record = self._get_record(user_id)
+        old_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+        record["tokens_used"] = min(record["tokens_used"] + count, DAILY_TOKEN_LIMIT)
+        new_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+
+        new_warnings = []
+        for threshold in WARNING_THRESHOLDS:
+            if old_percent < threshold <= new_percent and threshold not in record["warned_at"]:
+                record["warned_at"].append(threshold)
+                new_warnings.append(threshold)
+
+        return new_warnings
+
+
+token_tracker = DailyTokenTracker()
+
+
+def extract_user_id(request: Request) -> str | None:
+    """
+    Extracts Supabase user ID from the Authorization header.
+    Header: "Bearer <supabase_jwt>"
+    Decodes the JWT payload (no signature check needed — just reading sub claim).
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.split(" ", 1)[1]
+
+    try:
+        payload_b64 = token.split(".")[1]
+        # Pad base64 to multiple of 4
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+        return payload.get("sub")  # Supabase user ID lives in "sub"
+    except Exception:
+        return None
+
+
+def estimate_tokens(text: str) -> int:
+    """~4 characters per token — good enough for daily budgeting."""
+    return max(1, len(text) // 4)
+
 
 # =====================================================
 # CONFIG
@@ -51,54 +221,44 @@ SUBJECT_PROMPTS = {
     "Maths": """
 Show working steps. Highlight final answer: $x = 5$
 """,
-
     "Physics": """
 Format: Given -> Formula -> Calculation -> $Answer with units$
 Highlight key formulas and definitions.
 """,
-
     "Chemistry": """
 Balance equations. Use -> for reactions. Example: 2H_2 + O_2 -> 2H_2O
 Highlight important reactions and definitions.
 """,
-
     "Biology": """
 Highlight key definitions: $Mitosis is the process of cell division$
 Explain processes step by step.
 """,
-
     "English Literature": """
 Reference the text. Highlight key themes: $The poem explores the theme of loss and longing$
 """,
-
     "English Grammar": """
 State the rule. Highlight correct forms: $The passive voice is: The cake was eaten by him$
 """,
-
     "History": """
 Include dates. Highlight key facts: $The French Revolution began in 1789$
 """,
-
     "Economics": """
 Define terms. Highlight definitions: $GDP is the total value of goods and services produced$
 """,
-
     "Geography": """
 Include location context. Highlight key facts: $The Himalayas are young fold mountains$
 """,
-
     "Computer Applications": """
 Write code in plain text. Highlight syntax: $int x = 5;$
 """
 }
 
-# Default prompt for subjects not in the list
 DEFAULT_SUBJECT_PROMPT = """
 Explain clearly. Highlight key points with $...$
 """
 
 # =====================================================
-# BASE PROMPT (common for all subjects)
+# BASE PROMPT
 # =====================================================
 def get_base_prompt(board, class_level, subject, chapter, question):
     return f"""You are a {board} Class {class_level} {subject} teacher.
@@ -130,7 +290,7 @@ Keep answer short, clear, exam-focused for {board} Class {class_level}.
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.2"}
+    return {"status": "running", "version": "3.4"}
 
 @app.get("/health")
 def health():
@@ -141,11 +301,41 @@ def health():
     }
 
 # =====================================================
+# TOKEN USAGE ROUTE
+# Call this on page load to show the user their current quota.
+# =====================================================
+@app.get("/api/token-usage")
+async def get_token_usage(request: Request):
+    user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    return token_tracker.get_usage(user_id)
+
+# =====================================================
+# AUTH ROUTES (rate limited)
+# =====================================================
+@app.post("/api/login")
+async def login(request: Request, payload: dict):
+    check_rate_limit(request, "login")
+    return {"message": "Login route reached"}
+
+@app.post("/api/signup")
+async def signup(request: Request, payload: dict):
+    check_rate_limit(request, "signup")
+    return {"message": "Signup route reached"}
+
+@app.post("/api/reset-password")
+async def reset_password(request: Request, payload: dict):
+    check_rate_limit(request, "reset_password")
+    return {"message": "Reset password route reached"}
+
+# =====================================================
 # FILE UPLOAD HELPER
 # =====================================================
 async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
     import io
-    
+
     try:
         file_obj = io.BytesIO(raw_bytes)
         file_obj.name = name
@@ -162,15 +352,13 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
         for attempt in range(max_attempts):
             if uploaded.state.name == "ACTIVE":
                 return uploaded.uri, uploaded.name
-            
             if uploaded.state.name == "FAILED":
                 raise Exception(f"File processing failed: {name}")
-            
             await asyncio.sleep(1)
             uploaded = client.files.get(name=uploaded.name)
-        
+
         raise Exception(f"File processing timeout for: {name}")
-        
+
     except Exception as e:
         raise Exception(f"Failed to upload {name}: {str(e)}")
 
@@ -178,7 +366,29 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
 # MAIN ASK ROUTE
 # =====================================================
 @app.post("/api/ask")
-async def ask_question(payload: dict):
+async def ask_question(request: Request, payload: dict):
+
+    # ── IP rate limit ──
+    check_rate_limit(request, "ask")
+
+    # ── Require authenticated user ──
+    user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # ── Block if daily limit already reached ──
+    if token_tracker.is_limit_reached(user_id):
+        usage = token_tracker.get_usage(user_id)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "daily_limit_reached",
+                "message": "You've used your daily question limit. It resets at midnight UTC.",
+                "tokens_used": usage["tokens_used"],
+                "tokens_limit": usage["tokens_limit"],
+                "resets_at": "midnight UTC",
+            }
+        )
 
     board        = (payload.get("board")        or "ICSE").strip().upper()
     class_level  = (payload.get("class_level")  or "10").strip()
@@ -197,26 +407,21 @@ async def ask_question(payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # =====================================================
-    # MODEL SELECT
-    # =====================================================
+    # ── Model select ──
     if model_choice == "t2":
         model_name = "gemini-3.1-pro-preview"
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
-    # =====================================================
-    # BUILD PROMPT: Base + Subject-specific
-    # =====================================================
+    # ── Build prompt ──
     prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
-    
-    # Add subject-specific prompt
     subject_prompt = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
     prompt_text += "\n" + subject_prompt
 
-    # =====================================================
-    # PROCESS FILES
-    # =====================================================
+    # ── Estimate input tokens ──
+    input_token_estimate = estimate_tokens(prompt_text + question)
+
+    # ── Process files ──
     contents = []
     uploaded_file_uris = []
     file_errors = []
@@ -242,11 +447,9 @@ async def ask_question(payload: dict):
         if mime == "application/pdf":
             try:
                 uri, file_name = await upload_file_to_gemini(raw_bytes, "application/pdf", name)
-                contents.append(types.Part.from_uri(
-                    uri=uri,
-                    mime_type="application/pdf"
-                ))
+                contents.append(types.Part.from_uri(uri=uri, mime_type="application/pdf"))
                 uploaded_file_uris.append(file_name)
+                input_token_estimate += estimate_tokens(raw_bytes.decode("utf-8", errors="replace"))
             except Exception as e:
                 try:
                     contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
@@ -257,6 +460,7 @@ async def ask_question(payload: dict):
             try:
                 text_content = raw_bytes.decode("utf-8", errors="replace")
                 prompt_text += f"\n\n--- Content of {name} ---\n{text_content}\n--- End of {name} ---"
+                input_token_estimate += estimate_tokens(text_content)
             except Exception as e:
                 file_errors.append(f"Could not read text file '{name}': {str(e)}")
 
@@ -271,10 +475,10 @@ async def ask_question(payload: dict):
 
     contents.append(types.Part.from_text(text=prompt_text))
 
-    # =====================================================
-    # STREAM RESPONSE
-    # =====================================================
+    # ── Stream response ──
     async def stream():
+        output_chars = 0
+
         try:
             response_stream = client.models.generate_content_stream(
                 model=model_name,
@@ -295,6 +499,7 @@ async def ask_question(payload: dict):
                     text = chunk.text or ""
                     if text:
                         chunk_count += 1
+                        output_chars += len(text)
                         yield f"data: {json.dumps(text)}\n\n"
                 except StopIteration:
                     break
@@ -304,6 +509,24 @@ async def ask_question(payload: dict):
                         raise chunk_error
                     break
 
+            # ── Tally total tokens and check warning thresholds ──
+            output_token_estimate = estimate_tokens(" " * output_chars)
+            total_tokens = input_token_estimate + output_token_estimate
+            new_warnings = token_tracker.add_tokens(user_id, total_tokens)
+            usage = token_tracker.get_usage(user_id)
+
+            # Send usage event — frontend listens for this to show warnings/progress
+            usage_payload = {
+                "type": "token_update",
+                "tokens_used": usage["tokens_used"],
+                "tokens_limit": usage["tokens_limit"],
+                "tokens_remaining": usage["tokens_remaining"],
+                "percent_used": usage["percent_used"],
+                # New thresholds just crossed, e.g. [50] or [75, 90] or []
+                # Frontend should show a toast/banner for each one
+                "new_warnings": new_warnings,
+            }
+            yield f"event: usage\ndata: {json.dumps(usage_payload)}\n\n"
             yield "event: end\ndata: done\n\n"
 
         except Exception as e:
@@ -325,11 +548,60 @@ async def ask_question(payload: dict):
         stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control":    "no-cache",
-            "Connection":       "keep-alive",
+            "Cache-Control":     "no-cache",
+            "Connection":        "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
+
+# =====================================================
+# IMAGE GENERATION ROUTE (rate limited + token tracked)
+# =====================================================
+@app.post("/api/generate-image")
+async def generate_image(request: Request, payload: dict):
+
+    check_rate_limit(request, "generate_image")
+
+    user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if token_tracker.is_limit_reached(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "daily_limit_reached",
+                "message": "You've used your daily limit. It resets at midnight UTC.",
+            }
+        )
+
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    try:
+        response = client.models.generate_images(
+            model="imagen-3.0-generate-002",
+            prompt=prompt,
+            config=types.GenerateImagesConfig(number_of_images=1),
+        )
+
+        image_bytes = response.generated_images[0].image.image_bytes
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        # Flat 500 token cost for image generation
+        token_tracker.add_tokens(user_id, 500)
+
+        return {
+            "image": b64_image,
+            "mime_type": "image/png",
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        if "quota" in error_msg.lower():
+            raise HTTPException(status_code=429, detail="Image generation quota exceeded.")
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {error_msg}")
 
 # =====================================================
 # LOCAL RUN
