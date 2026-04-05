@@ -27,6 +27,10 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # use service role key
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables must be set")
 
+TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
+if not TURNSTILE_SECRET_KEY:
+    raise RuntimeError("TURNSTILE_SECRET_KEY environment variable not set")
+
 # =====================================================
 # APP INIT
 # =====================================================
@@ -382,6 +386,35 @@ async def get_token_usage(request: Request):
         raise HTTPException(status_code=401, detail="Authentication required")
 
     return await get_usage(user_id)
+
+# =====================================================
+# TURNSTILE VERIFICATION
+# =====================================================
+@app.post("/api/verify-turnstile")
+async def verify_turnstile(request: Request, payload: dict):
+    """
+    Verifies a Cloudflare Turnstile token.
+    Called by login and signup forms before submitting to Supabase.
+    """
+    token = (payload.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Turnstile token required")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={
+                    "secret": TURNSTILE_SECRET_KEY,
+                    "response": token,
+                    "remoteip": limiter.get_ip(request),
+                },
+            )
+        result = resp.json()
+        return {"success": result.get("success", False)}
+    except Exception as e:
+        print(f"[Turnstile] Verification error: {e}")
+        return {"success": False}
 
 # =====================================================
 # AUTH ROUTES (rate limited)
