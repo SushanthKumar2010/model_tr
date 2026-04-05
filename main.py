@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -20,10 +21,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # use service role key — not anon
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables must be set")
+
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.4")
+app = FastAPI(title="AI Tutor Backend", version="3.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,92 +97,158 @@ def check_rate_limit(request: Request, endpoint: str):
         )
 
 # =====================================================
-# DAILY TOKEN TRACKER (per Supabase user)
+# DAILY TOKEN TRACKER — Supabase-backed
+# Reads/writes daily_tokens_used + daily_tokens_date
+# columns on the user_profiles table.
+# Falls back to in-memory if Supabase is unreachable.
 # =====================================================
 
-DAILY_TOKEN_LIMIT = 50_000      # tokens per user per day
-WARNING_THRESHOLDS = [50, 75, 90]  # warn at these % of daily limit
+DAILY_TOKEN_LIMIT = 50_000
+WARNING_THRESHOLDS = [50, 75, 90, 100]
 
-class DailyTokenTracker:
-    """
-    Tracks token usage per Supabase user ID, resets at UTC midnight.
+# In-memory cache to avoid hitting Supabase on every single chunk
+# { user_id: { "date": "YYYY-MM-DD", "tokens_used": int, "warned_at": [50,75] } }
+_token_cache: dict[str, dict] = {}
 
-    Storage format:
-    {
-        "user_id": {
-            "date": "2026-04-05",      # UTC date — resets when this changes
-            "tokens_used": 12400,
-            "warned_at": [50, 75]      # thresholds already notified
-        }
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _supabase_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
     }
 
-    Note: In-memory only — resets if Render restarts.
-    To persist across restarts, write tokens_used to a Supabase table.
+
+async def _load_from_supabase(user_id: str) -> dict:
     """
+    Fetch daily_tokens_used and daily_tokens_date from user_profiles.
+    Returns a fresh record dict. Falls back to zeroed record on error.
+    """
+    today = _today()
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=_supabase_headers(),
+                params={
+                    "select": "daily_tokens_used,daily_tokens_date",
+                    "id": f"eq.{user_id}",
+                    "limit": "1",
+                },
+            )
+        if resp.status_code == 200:
+            rows = resp.json()
+            if rows:
+                row = rows[0]
+                db_date = (row.get("daily_tokens_date") or "")[:10]  # strip time if present
+                tokens_used = row.get("daily_tokens_used") or 0
 
-    def __init__(self):
-        self._store: dict[str, dict] = {}
+                # If DB date is today keep the count, otherwise treat as fresh day
+                if db_date == today:
+                    return {
+                        "date": today,
+                        "tokens_used": tokens_used,
+                        "warned_at": [],  # warnings are session-only — no need to persist
+                    }
+    except Exception as e:
+        print(f"[Token] Supabase load error for {user_id}: {e}")
 
-    def _today(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def _get_record(self, user_id: str) -> dict:
-        today = self._today()
-        record = self._store.get(user_id)
-
-        # New user or new UTC day — reset
-        if not record or record["date"] != today:
-            self._store[user_id] = {
-                "date": today,
-                "tokens_used": 0,
-                "warned_at": [],
-            }
-
-        return self._store[user_id]
-
-    def get_usage(self, user_id: str) -> dict:
-        record = self._get_record(user_id)
-        tokens_used = record["tokens_used"]
-        percent = round((tokens_used / DAILY_TOKEN_LIMIT) * 100, 1)
-
-        return {
-            "tokens_used": tokens_used,
-            "tokens_limit": DAILY_TOKEN_LIMIT,
-            "tokens_remaining": max(0, DAILY_TOKEN_LIMIT - tokens_used),
-            "percent_used": percent,
-        }
-
-    def is_limit_reached(self, user_id: str) -> bool:
-        record = self._get_record(user_id)
-        return record["tokens_used"] >= DAILY_TOKEN_LIMIT
-
-    def add_tokens(self, user_id: str, count: int) -> list[int]:
-        """
-        Adds tokens used for a request.
-        Returns list of NEW warning thresholds just crossed e.g. [50] or [75, 90].
-        """
-        record = self._get_record(user_id)
-        old_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
-        record["tokens_used"] = min(record["tokens_used"] + count, DAILY_TOKEN_LIMIT)
-        new_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
-
-        new_warnings = []
-        for threshold in WARNING_THRESHOLDS:
-            if old_percent < threshold <= new_percent and threshold not in record["warned_at"]:
-                record["warned_at"].append(threshold)
-                new_warnings.append(threshold)
-
-        return new_warnings
+    # Fresh record (new user, new day, or error)
+    return {"date": today, "tokens_used": 0, "warned_at": []}
 
 
-token_tracker = DailyTokenTracker()
+async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
+    """
+    Persist today's token count back to user_profiles.
+    Fire-and-forget — errors are logged but not raised.
+    """
+    today = _today()
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=_supabase_headers(),
+                params={"id": f"eq.{user_id}"},
+                json={
+                    "daily_tokens_used": tokens_used,
+                    "daily_tokens_date": today,
+                },
+            )
+    except Exception as e:
+        print(f"[Token] Supabase save error for {user_id}: {e}")
 
+
+async def get_token_record(user_id: str) -> dict:
+    """
+    Returns the cached record for today, loading from Supabase if needed.
+    """
+    today = _today()
+    cached = _token_cache.get(user_id)
+
+    # Cache hit for today
+    if cached and cached["date"] == today:
+        return cached
+
+    # Cache miss or stale day — reload from Supabase
+    record = await _load_from_supabase(user_id)
+    _token_cache[user_id] = record
+    return record
+
+
+async def is_limit_reached(user_id: str) -> bool:
+    record = await get_token_record(user_id)
+    return record["tokens_used"] >= DAILY_TOKEN_LIMIT
+
+
+async def get_usage(user_id: str) -> dict:
+    record = await get_token_record(user_id)
+    tokens_used = record["tokens_used"]
+    percent = round((tokens_used / DAILY_TOKEN_LIMIT) * 100, 1)
+    return {
+        "tokens_used": tokens_used,
+        "tokens_limit": DAILY_TOKEN_LIMIT,
+        "tokens_remaining": max(0, DAILY_TOKEN_LIMIT - tokens_used),
+        "percent_used": percent,
+    }
+
+
+async def add_tokens(user_id: str, count: int) -> list[int]:
+    """
+    Adds tokens to the user's daily count.
+    Updates cache immediately, persists to Supabase asynchronously.
+    Returns list of newly crossed warning thresholds.
+    """
+    record = await get_token_record(user_id)
+    old_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+    record["tokens_used"] = min(record["tokens_used"] + count, DAILY_TOKEN_LIMIT)
+    new_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+
+    # Check warning thresholds
+    new_warnings = []
+    for threshold in WARNING_THRESHOLDS:
+        if old_percent < threshold <= new_percent and threshold not in record["warned_at"]:
+            record["warned_at"].append(threshold)
+            new_warnings.append(threshold)
+
+    # Persist to Supabase in background (don't await — don't block the stream)
+    asyncio.create_task(_save_to_supabase(user_id, record["tokens_used"]))
+
+    return new_warnings
+
+
+# =====================================================
+# AUTH HELPERS
+# =====================================================
 
 def extract_user_id(request: Request) -> str | None:
     """
     Extracts Supabase user ID from the Authorization header.
     Header: "Bearer <supabase_jwt>"
-    Decodes the JWT payload (no signature check needed — just reading sub claim).
+    Decodes JWT payload without signature verification (just reads sub claim).
     """
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -185,12 +258,11 @@ def extract_user_id(request: Request) -> str | None:
 
     try:
         payload_b64 = token.split(".")[1]
-        # Pad base64 to multiple of 4
         padding = 4 - len(payload_b64) % 4
         if padding != 4:
             payload_b64 += "=" * padding
         payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
-        return payload.get("sub")  # Supabase user ID lives in "sub"
+        return payload.get("sub")
     except Exception:
         return None
 
@@ -268,7 +340,7 @@ Student asked: \"\"\"{question}\"\"\"
 FORMATTING RULES:
 - Plain text only. No LaTeX, no Markdown, no HTML.
 - Powers: use ^ like x^2, a^3, r^2
-- Subscripts: use _ like H_2O, a_n, x_1  
+- Subscripts: use _ like H_2O, a_n, x_1
 - Arrows: use -> for reactions
 - Greek letters: write as words (pi, theta, alpha)
 - Square root: write as sqrt() like sqrt(2)
@@ -290,7 +362,7 @@ Keep answer short, clear, exam-focused for {board} Class {class_level}.
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.4"}
+    return {"status": "running", "version": "3.5"}
 
 @app.get("/health")
 def health():
@@ -302,7 +374,6 @@ def health():
 
 # =====================================================
 # TOKEN USAGE ROUTE
-# Call this on page load to show the user their current quota.
 # =====================================================
 @app.get("/api/token-usage")
 async def get_token_usage(request: Request):
@@ -310,7 +381,7 @@ async def get_token_usage(request: Request):
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    return token_tracker.get_usage(user_id)
+    return await get_usage(user_id)
 
 # =====================================================
 # AUTH ROUTES (rate limited)
@@ -371,14 +442,12 @@ async def ask_question(request: Request, payload: dict):
     # ── IP rate limit ──
     check_rate_limit(request, "ask")
 
-    # ── Require authenticated user ──
+    # ── Auth: optional — token tracking skipped if not logged in ──
     user_id = extract_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authentication required")
 
     # ── Block if daily limit already reached ──
-    if token_tracker.is_limit_reached(user_id):
-        usage = token_tracker.get_usage(user_id)
+    if user_id and await is_limit_reached(user_id):
+        usage = await get_usage(user_id)
         raise HTTPException(
             status_code=429,
             detail={
@@ -509,24 +578,23 @@ async def ask_question(request: Request, payload: dict):
                         raise chunk_error
                     break
 
-            # ── Tally total tokens and check warning thresholds ──
+            # ── Tally tokens, persist to Supabase, send usage event ──
             output_token_estimate = estimate_tokens(" " * output_chars)
             total_tokens = input_token_estimate + output_token_estimate
-            new_warnings = token_tracker.add_tokens(user_id, total_tokens)
-            usage = token_tracker.get_usage(user_id)
 
-            # Send usage event — frontend listens for this to show warnings/progress
-            usage_payload = {
-                "type": "token_update",
-                "tokens_used": usage["tokens_used"],
-                "tokens_limit": usage["tokens_limit"],
-                "tokens_remaining": usage["tokens_remaining"],
-                "percent_used": usage["percent_used"],
-                # New thresholds just crossed, e.g. [50] or [75, 90] or []
-                # Frontend should show a toast/banner for each one
-                "new_warnings": new_warnings,
-            }
-            yield f"event: usage\ndata: {json.dumps(usage_payload)}\n\n"
+            if user_id:
+                new_warnings = await add_tokens(user_id, total_tokens)
+                usage = await get_usage(user_id)
+                usage_payload = {
+                    "type": "token_update",
+                    "tokens_used": usage["tokens_used"],
+                    "tokens_limit": usage["tokens_limit"],
+                    "tokens_remaining": usage["tokens_remaining"],
+                    "percent_used": usage["percent_used"],
+                    "new_warnings": new_warnings,
+                }
+                yield f"event: usage\ndata: {json.dumps(usage_payload)}\n\n"
+
             yield "event: end\ndata: done\n\n"
 
         except Exception as e:
@@ -563,10 +631,8 @@ async def generate_image(request: Request, payload: dict):
     check_rate_limit(request, "generate_image")
 
     user_id = extract_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authentication required")
 
-    if token_tracker.is_limit_reached(user_id):
+    if user_id and await is_limit_reached(user_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -590,7 +656,8 @@ async def generate_image(request: Request, payload: dict):
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
         # Flat 500 token cost for image generation
-        token_tracker.add_tokens(user_id, 500)
+        if user_id:
+            await add_tokens(user_id, 500)
 
         return {
             "image": b64_image,
