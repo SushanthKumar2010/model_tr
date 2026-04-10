@@ -729,10 +729,14 @@ Style requirements:
 """.strip()
 
     try:
-        response = client.models.generate_images(
+        # generate_image (no s) + GenerateImageConfig (no s) = works on 0.2.2 AND 1.x
+        generate_fn = getattr(client.models, "generate_images", None) or getattr(client.models, "generate_image", None)
+        ImageConfigClass = getattr(types, "GenerateImagesConfig", None) or getattr(types, "GenerateImageConfig", None)
+
+        response = generate_fn(
             model="imagen-3.0-generate-002",
             prompt=engineered_prompt,
-            config=types.GenerateImagesConfig(
+            config=ImageConfigClass(
                 number_of_images=1,
             ),
         )
