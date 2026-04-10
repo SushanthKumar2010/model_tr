@@ -710,25 +710,31 @@ async def generate_image(request: Request, payload: dict):
 
     # ── Prompt engineering — always produce clean, textbook-style diagrams ──
     engineered_prompt = f"""
-Educational diagram for {board} Class {class_level} {subject}.
+Create an accurate educational diagram for {board} Class {class_level} {subject}.
 Topic: {raw_prompt}
+
+CRITICAL TEXT ACCURACY REQUIREMENTS (most important):
+- Every single word, label, formula, and term must be spelled PERFECTLY and be scientifically correct
+- Double-check all spelling before rendering — no typos allowed whatsoever
+- Use only standard, correct terminology as taught in {board} Class {class_level} textbooks
+- All mathematical symbols, formulas, and equations must be 100% accurate
+- Labels must use the exact correct English spelling (e.g. "Hypotenuse" not "Hypotunse", "Adjacent" not "Adjecent", "Opposite" not "Oppoite")
 
 Style requirements:
 - Clean, minimal, flat design — like a professional textbook or Khan Academy illustration
-- White or very light background
+- White background
 - Clear, readable labels in simple sans-serif font
 - Crisp lines and shapes, no textures or noise
-- Muted, harmonious colours (blues, teens, soft greens) — no neon or gradients
+- Muted colours (blues, teals, soft greens) — no neon or gradients
 - No photorealism, no 3D rendering, no shading
-- No AI art aesthetic — looks hand-drawn by a skilled teacher or designer
-- Include clear title and all important labels
+- Include a clear, correctly spelled title and all important labels
 - Plenty of whitespace, uncluttered layout
 """.strip()
 
     try:
         # Use gemini-2.5-flash-preview-05-20 for image generation via generate_content
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model="gemini-2.5-flash-image-preview",
             contents=engineered_prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE", "TEXT"],
