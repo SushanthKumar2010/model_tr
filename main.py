@@ -131,7 +131,7 @@ async def _load_from_supabase(user_id: str) -> dict:
                 f"{SUPABASE_URL}/rest/v1/user_profiles",
                 headers=_supabase_headers(),
                 params={
-                    "select": "daily_tokens_used,daily_tokens_date,daily_token_limit",
+                    "select": "daily_tokens_used,daily_tokens_date,daily_token_limit,plan,plan_expires_at",
                     "id": f"eq.{user_id}",
                     "limit": "1",
                 },
@@ -144,17 +144,27 @@ async def _load_from_supabase(user_id: str) -> dict:
                 tokens_used = row.get("daily_tokens_used") or 0
                 token_limit = row.get("daily_token_limit") or DEFAULT_TOKEN_LIMIT
 
+                # Check if paid plan is still active
+                plan = row.get("plan") or "free"
+                plan_expires_at = row.get("plan_expires_at")
+                if plan != "free" and plan_expires_at:
+                    from datetime import timezone
+                    expires = datetime.fromisoformat(plan_expires_at.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > expires:
+                        plan = "free"  # plan expired
+
                 if db_date == today:
                     return {
                         "date": today,
                         "tokens_used": tokens_used,
                         "token_limit": token_limit,
+                        "plan": plan,
                         "warned_at": [],
                     }
     except Exception as e:
         print(f"[Token] Supabase load error for {user_id}: {e}")
 
-    return {"date": today, "tokens_used": 0, "token_limit": DEFAULT_TOKEN_LIMIT, "warned_at": []}
+    return {"date": today, "tokens_used": 0, "token_limit": DEFAULT_TOKEN_LIMIT, "plan": "free", "warned_at": []}
 
 
 async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
@@ -205,6 +215,7 @@ async def get_usage(user_id: str) -> dict:
         "tokens_limit": token_limit,
         "tokens_remaining": max(0, token_limit - tokens_used),
         "percent_used": percent,
+        "plan": record.get("plan", "free"),
     }
 
 
@@ -512,8 +523,15 @@ async def ask_question(request: Request, payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    if model_choice == "t2":
+    # ── Plan-based model access ──
+    record = await get_token_record(user_id) if user_id else {"plan": "free"}
+    user_plan = record.get("plan", "free")
+
+    if model_choice == "t2" and user_plan == "pro":
         model_name = "gemini-3.1-pro-preview"
+    elif model_choice == "t2" and user_plan != "pro":
+        # Free user trying to use T2 — silently fall back to T1
+        model_name = "gemini-3.1-flash-lite-preview"
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
@@ -661,8 +679,10 @@ async def generate_image(request: Request, payload: dict):
     check_rate_limit(request, "generate_image")
 
     user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
-    if user_id and await is_limit_reached(user_id):
+    if await is_limit_reached(user_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -671,15 +691,39 @@ async def generate_image(request: Request, payload: dict):
             }
         )
 
-    prompt = (payload.get("prompt") or "").strip()
-    if not prompt:
+    raw_prompt   = (payload.get("prompt")      or "").strip()
+    board        = (payload.get("board")       or "ICSE").strip().upper()
+    class_level  = (payload.get("class_level") or "10").strip()
+    subject      = (payload.get("subject")     or "General").strip()
+
+    if not raw_prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
+
+    # ── Prompt engineering — always produce clean, textbook-style diagrams ──
+    engineered_prompt = f"""
+Educational diagram for {board} Class {class_level} {subject}.
+Topic: {raw_prompt}
+
+Style requirements:
+- Clean, minimal, flat design — like a professional textbook or Khan Academy illustration
+- White or very light background
+- Clear, readable labels in simple sans-serif font
+- Crisp lines and shapes, no textures or noise
+- Muted, harmonious colours (blues, teens, soft greens) — no neon or gradients
+- No photorealism, no 3D rendering, no shading
+- No AI art aesthetic — looks hand-drawn by a skilled teacher or designer
+- Include clear title and all important labels
+- Plenty of whitespace, uncluttered layout
+""".strip()
 
     try:
         response = client.models.generate_images(
             model="imagen-3.0-generate-002",
-            prompt=prompt,
-            config=types.GenerateImagesConfig(number_of_images=1),
+            prompt=engineered_prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="4:3",
+            ),
         )
 
         image_bytes = response.generated_images[0].image.image_bytes
