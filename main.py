@@ -311,7 +311,9 @@ except Exception:
     _genai_version = "unknown"
 print(f"[Startup] google-genai version: {_genai_version}")
 
-client = genai.Client(
+client = genai.Client(api_key=GEMINI_API_KEY)
+# Separate client for Imagen (requires v1, not v1beta)
+imagen_client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options={"api_version": "v1"},
 )
@@ -730,7 +732,7 @@ Style requirements:
 
     try:
         # generate_image (no s) + GenerateImageConfig (no s) = works on 0.2.2 AND 1.x
-        generate_fn = getattr(client.models, "generate_images", None) or getattr(client.models, "generate_image", None)
+        generate_fn = getattr(imagen_client.models, "generate_images", None) or getattr(imagen_client.models, "generate_image", None)
         ImageConfigClass = getattr(types, "GenerateImagesConfig", None) or getattr(types, "GenerateImageConfig", None)
 
         response = generate_fn(
