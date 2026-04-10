@@ -105,8 +105,8 @@ def check_rate_limit(request: Request, endpoint: str):
 # DAILY TOKEN TRACKER — Supabase-backed
 # =====================================================
 
-DAILY_TOKEN_LIMIT = 50_000
-WARNING_THRESHOLDS = [50, 75, 90, 100]
+DEFAULT_TOKEN_LIMIT = 50_000  # fallback if not set in Supabase
+WARNING_THRESHOLDS  = [50, 75, 90, 100]
 
 _token_cache: dict[str, dict] = {}
 
@@ -131,7 +131,7 @@ async def _load_from_supabase(user_id: str) -> dict:
                 f"{SUPABASE_URL}/rest/v1/user_profiles",
                 headers=_supabase_headers(),
                 params={
-                    "select": "daily_tokens_used,daily_tokens_date",
+                    "select": "daily_tokens_used,daily_tokens_date,daily_token_limit",
                     "id": f"eq.{user_id}",
                     "limit": "1",
                 },
@@ -142,17 +142,19 @@ async def _load_from_supabase(user_id: str) -> dict:
                 row = rows[0]
                 db_date = (row.get("daily_tokens_date") or "")[:10]
                 tokens_used = row.get("daily_tokens_used") or 0
+                token_limit = row.get("daily_token_limit") or DEFAULT_TOKEN_LIMIT
 
                 if db_date == today:
                     return {
                         "date": today,
                         "tokens_used": tokens_used,
+                        "token_limit": token_limit,
                         "warned_at": [],
                     }
     except Exception as e:
         print(f"[Token] Supabase load error for {user_id}: {e}")
 
-    return {"date": today, "tokens_used": 0, "warned_at": []}
+    return {"date": today, "tokens_used": 0, "token_limit": DEFAULT_TOKEN_LIMIT, "warned_at": []}
 
 
 async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
@@ -190,26 +192,28 @@ async def get_token_record(user_id: str) -> dict:
 
 async def is_limit_reached(user_id: str) -> bool:
     record = await get_token_record(user_id)
-    return record["tokens_used"] >= DAILY_TOKEN_LIMIT
+    return record["tokens_used"] >= record.get("token_limit", DEFAULT_TOKEN_LIMIT)
 
 
 async def get_usage(user_id: str) -> dict:
     record = await get_token_record(user_id)
     tokens_used = record["tokens_used"]
-    percent = round((tokens_used / DAILY_TOKEN_LIMIT) * 100, 1)
+    token_limit = record.get("token_limit", DEFAULT_TOKEN_LIMIT)
+    percent = round((tokens_used / token_limit) * 100, 1)
     return {
         "tokens_used": tokens_used,
-        "tokens_limit": DAILY_TOKEN_LIMIT,
-        "tokens_remaining": max(0, DAILY_TOKEN_LIMIT - tokens_used),
+        "tokens_limit": token_limit,
+        "tokens_remaining": max(0, token_limit - tokens_used),
         "percent_used": percent,
     }
 
 
 async def add_tokens(user_id: str, count: int) -> list[int]:
     record = await get_token_record(user_id)
-    old_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
-    record["tokens_used"] = min(record["tokens_used"] + count, DAILY_TOKEN_LIMIT)
-    new_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+    token_limit = record.get("token_limit", DEFAULT_TOKEN_LIMIT)
+    old_percent = (record["tokens_used"] / token_limit) * 100
+    record["tokens_used"] = min(record["tokens_used"] + count, token_limit)
+    new_percent = (record["tokens_used"] / token_limit) * 100
 
     new_warnings = []
     for threshold in WARNING_THRESHOLDS:
@@ -486,6 +490,7 @@ async def ask_question(request: Request, payload: dict):
                 "message": "You've used your daily question limit. It resets at midnight UTC.",
                 "tokens_used": usage["tokens_used"],
                 "tokens_limit": usage["tokens_limit"],
+                "tokens_remaining": usage["tokens_remaining"],
                 "resets_at": "midnight UTC",
             }
         )
