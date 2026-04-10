@@ -174,12 +174,16 @@ async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
 
 async def get_token_record(user_id: str) -> dict:
     today = _today()
-    cached = _token_cache.get(user_id)
 
-    if cached and cached["date"] == today:
-        return cached
-
+    # Always load fresh from Supabase so manual DB edits reflect immediately.
+    # In-memory cache is only used as a write buffer, not as a read source.
     record = await _load_from_supabase(user_id)
+
+    # Preserve in-memory warned_at state (session only, no need to persist)
+    cached = _token_cache.get(user_id)
+    if cached and cached["date"] == today:
+        record["warned_at"] = cached.get("warned_at", [])
+
     _token_cache[user_id] = record
     return record
 
