@@ -153,14 +153,15 @@ async def _load_from_supabase(user_id: str) -> dict:
                     if datetime.now(timezone.utc) > expires:
                         plan = "free"  # plan expired
 
-                if db_date == today:
-                    return {
-                        "date": today,
-                        "tokens_used": tokens_used,
-                        "token_limit": token_limit,
-                        "plan": plan,
-                        "warned_at": [],
-                    }
+                # If date matches today, use stored tokens. If different day, reset to 0.
+                tokens_for_today = tokens_used if db_date == today else 0
+                return {
+                    "date": today,
+                    "tokens_used": tokens_for_today,
+                    "token_limit": token_limit,
+                    "plan": plan,
+                    "warned_at": [],
+                }
     except Exception as e:
         print(f"[Token] Supabase load error for {user_id}: {e}")
 
@@ -301,6 +302,13 @@ SUPPORTED_MIME_TYPES = {
     "application/pdf",
     "text/plain",
 }
+
+import importlib.metadata
+try:
+    _genai_version = importlib.metadata.version("google-genai")
+except Exception:
+    _genai_version = "unknown"
+print(f"[Startup] google-genai version: {_genai_version}")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
