@@ -728,7 +728,7 @@ Style requirements:
     try:
         # Use gemini-2.5-flash-preview-05-20 for image generation via generate_content
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp-image-generation",
+            model="gemini-2.5-flash-image",
             contents=engineered_prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE", "TEXT"],
