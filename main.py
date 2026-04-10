@@ -312,11 +312,6 @@ except Exception:
 print(f"[Startup] google-genai version: {_genai_version}")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Separate client for Imagen (requires v1, not v1beta)
-imagen_client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={"api_version": "v1"},
-)
 
 # =====================================================
 # SUBJECT-SPECIFIC PROMPTS
@@ -731,19 +726,27 @@ Style requirements:
 """.strip()
 
     try:
-        # generate_image (no s) + GenerateImageConfig (no s) = works on 0.2.2 AND 1.x
-        generate_fn = getattr(imagen_client.models, "generate_images", None) or getattr(imagen_client.models, "generate_image", None)
-        ImageConfigClass = getattr(types, "GenerateImagesConfig", None) or getattr(types, "GenerateImageConfig", None)
-
-        response = generate_fn(
-            model="imagen-3.0-generate-002",
-            prompt=engineered_prompt,
-            config=ImageConfigClass(
-                number_of_images=1,
+        # Use gemini-2.5-flash-preview-05-20 for image generation via generate_content
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp-image-generation",
+            contents=engineered_prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
             ),
         )
 
-        image_bytes = response.generated_images[0].image.image_bytes
+        # Extract image bytes from response
+        image_bytes = None
+        mime_type = "image/png"
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data
+                mime_type = part.inline_data.mime_type or "image/png"
+                break
+
+        if not image_bytes:
+            raise Exception("No image returned in response")
+
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
         if user_id:
@@ -751,13 +754,13 @@ Style requirements:
 
         return {
             "image": b64_image,
-            "mime_type": "image/png",
+            "mime_type": mime_type,
         }
 
     except Exception as e:
         error_msg = str(e)
         print(f"[ImageGen] Error: {error_msg}")
-        if "quota" in error_msg.lower():
+        if "quota" in error_msg.lower() or "429" in error_msg:
             raise HTTPException(status_code=429, detail="Image generation quota exceeded.")
         if "safety" in error_msg.lower() or "block" in error_msg.lower():
             raise HTTPException(status_code=400, detail="Image blocked by safety filter. Try rephrasing your request.")
