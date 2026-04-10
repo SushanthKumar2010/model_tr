@@ -722,7 +722,6 @@ Style requirements:
             prompt=engineered_prompt,
             config=types.GenerateImagesConfig(
                 number_of_images=1,
-                aspect_ratio="4:3",
             ),
         )
 
@@ -739,8 +738,11 @@ Style requirements:
 
     except Exception as e:
         error_msg = str(e)
+        print(f"[ImageGen] Error: {error_msg}")
         if "quota" in error_msg.lower():
             raise HTTPException(status_code=429, detail="Image generation quota exceeded.")
+        if "safety" in error_msg.lower() or "block" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="Image blocked by safety filter. Try rephrasing your request.")
         raise HTTPException(status_code=500, detail=f"Image generation failed: {error_msg}")
 
 # =====================================================
