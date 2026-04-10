@@ -153,7 +153,8 @@ async def _load_from_supabase(user_id: str) -> dict:
                     if datetime.now(timezone.utc) > expires:
                         plan = "free"  # plan expired
 
-                # If date matches today, use stored tokens. If different day, reset to 0.
+                # If same day: use stored tokens.
+                # If new day: treat as 0 (resets naturally on first question).
                 tokens_for_today = tokens_used if db_date == today else 0
                 return {
                     "date": today,
@@ -310,7 +311,10 @@ except Exception:
     _genai_version = "unknown"
 print(f"[Startup] google-genai version: {_genai_version}")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options={"api_version": "v1"},
+)
 
 # =====================================================
 # SUBJECT-SPECIFIC PROMPTS
