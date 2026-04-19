@@ -38,7 +38,7 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.6")
+app = FastAPI(title="AI Tutor Backend", version="3.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +137,6 @@ async def _load_from_supabase(user_id: str) -> dict:
                 plan = row.get("plan") or "free"
                 plan_expires_at = row.get("plan_expires_at")
                 if plan != "free" and plan_expires_at:
-                    from datetime import timezone
                     expires = datetime.fromisoformat(plan_expires_at.replace("Z", "+00:00"))
                     if datetime.now(timezone.utc) > expires:
                         plan = "free"
@@ -252,7 +251,7 @@ def estimate_tokens(text: str) -> int:
 
 
 # =====================================================
-# CONFIG — SSLC replaced with NCERT
+# CONFIG
 # =====================================================
 ALLOWED_BOARDS = {"ICSE", "CBSE", "NCERT"}
 
@@ -272,156 +271,118 @@ print(f"[Startup] google-genai version: {_genai_version}")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
-# SUBJECT-SPECIFIC PROMPTS
+# SYSTEM INSTRUCTION — applied to every request
+# Keeps the no-asterisks rule out of the user prompt
+# so it costs zero extra tokens per question.
+# =====================================================
+SYSTEM_INSTRUCTION = (
+    "You are Teengro, a friendly AI tutor for Indian school students. "
+    "FORMATTING RULES — follow these without exception: "
+    "NEVER use **asterisks** or markdown bold (**, __, ##, >). "
+    "The ONLY way to highlight text is with $dollar signs$ like this: $Answer: x = 3$. "
+    "If you feel like typing **, type $ instead. Asterisks are completely forbidden."
+)
+
+# =====================================================
+# SUBJECT-SPECIFIC PROMPTS (trimmed — no repeated bold rule)
 # =====================================================
 
 SUBJECT_PROMPTS = {
-    "Maths": """
-Show step-by-step working. Write numbers and operations clearly in plain text (e.g. 2 x 3 = 6, x^2 + 5x + 6 = 0).
-Avoid complex notation. Highlight the final answer like $Answer: x = 3$
-Keep it simple — if a student can understand it without advanced notation, write it that way.
-Break each step onto its own line so it is easy to follow.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Physics": """
-Format: Given -> Formula -> Calculation -> Answer with units.
-Write formulas in plain text (e.g. F = m x a, v^2 = u^2 + 2as).
-Only show the formula that is actually needed — do not dump every related formula.
-Highlight key formulas like $F = m x a$ and final answers like $Answer: 10 N$.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Chemistry": """
-Balance equations. Use -> for reactions (e.g. 2H_2 + O_2 -> 2H_2O).
-Write subscripts with _ (e.g. H_2O, CO_2). Keep explanations straightforward.
-Highlight important reactions like $2H_2 + O_2 -> 2H_2O$ and key definitions.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Biology": """
-Highlight key definitions like $Mitosis is the process of cell division$.
-Explain processes step by step in simple language. No jargon without explanation.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "English Literature": """
-Reference the text. Highlight key themes like $The poem explores the theme of loss and longing$.
-Use clear, simple language a student can reproduce in an exam answer.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "English Grammar": """
-State the rule clearly first. Then give a simple example.
-Highlight correct forms like $Passive voice: The cake was eaten by him$.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "History": """
-Include dates and context. Highlight key facts like $The French Revolution began in 1789$.
-Keep cause-effect explanations concise.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Economics": """
-Define terms first. Highlight definitions like $GDP is the total value of goods and services produced$.
-Use real-world examples where helpful.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Geography": """
-Include location context. Highlight key facts like $The Himalayas are young fold mountains$.
-Use simple descriptions instead of technical jargon where possible.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-""",
-    "Computer Applications": """
-Write code in plain text with proper indentation. Highlight syntax like $int x = 5;$.
-Explain what each line does in simple terms.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-"""
+    "Maths": (
+        "Show step-by-step working in plain text (e.g. 2 x 3 = 6, x^2 + 5x + 6 = 0). "
+        "Highlight final answer like $Answer: x = 3$. Break each step onto its own line."
+    ),
+    "Physics": (
+        "Format: Given → Formula → Calculation → Answer with units. "
+        "Write formulas in plain text (e.g. F = m x a). "
+        "Highlight key formula like $F = m x a$ and final answer like $Answer: 10 N$."
+    ),
+    "Chemistry": (
+        "Balance equations. Use -> for reactions (e.g. 2H_2 + O_2 -> 2H_2O). "
+        "Write subscripts with _ (e.g. H_2O). "
+        "Highlight reactions like $2H_2 + O_2 -> 2H_2O$."
+    ),
+    "Biology": (
+        "Highlight key definitions like $Mitosis is cell division$. "
+        "Explain step by step in simple language."
+    ),
+    "English Literature": (
+        "Reference the text. Highlight themes like $The poem explores loss$. "
+        "Use clear language a student can reproduce in an exam."
+    ),
+    "English Grammar": (
+        "State the rule first, then give a simple example. "
+        "Highlight correct forms like $Passive: The cake was eaten by him$."
+    ),
+    "History": (
+        "Include dates and context. Highlight key facts like $French Revolution began in 1789$."
+    ),
+    "Economics": (
+        "Define terms first. Highlight like $GDP is total value of goods and services produced$."
+    ),
+    "Geography": (
+        "Include location context. Highlight like $Himalayas are young fold mountains$."
+    ),
+    "Computer Applications": (
+        "Write code with proper indentation. Highlight syntax like $int x = 5;$. "
+        "Explain each line simply."
+    ),
 }
 
-DEFAULT_SUBJECT_PROMPT = """
-Explain clearly using simple language. Highlight key points with $dollar signs like this$.
-IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
-"""
+DEFAULT_SUBJECT_PROMPT = "Explain clearly. Highlight key points like $this$."
 
 # =====================================================
-# BASE PROMPT
-# Board/class accuracy + guardrails + simplicity rules
+# BASE PROMPT (tightened — saves ~30% tokens vs original)
 # =====================================================
 def get_base_prompt(board, class_level, subject, chapter, question):
     board_context = {
-        "ICSE": "ICSE (Indian Certificate of Secondary Education) — CISCE curriculum. Known for detailed, descriptive answers.",
-        "CBSE": "CBSE (Central Board of Secondary Education) — follows NCERT textbooks. Focuses on conceptual clarity.",
-        "NCERT": "NCERT (National Council of Educational Research and Training) — the standard national curriculum used across India by most state and central boards.",
+        "ICSE": "CISCE curriculum — detailed, descriptive answers.",
+        "CBSE": "follows NCERT textbooks — conceptual clarity.",
+        "NCERT": "standard national curriculum used across India.",
     }.get(board, board)
 
-    return f"""You are Teengro, a friendly and focused AI tutor for Indian school students.
+    subject_hint = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
 
-STUDENT DETAILS — READ CAREFULLY BEFORE ANSWERING:
-- Board: {board} ({board_context})
-- Class: {class_level}
-- Subject: {subject}
-- Chapter: {chapter}
+    return f"""You are Teengro, a friendly AI tutor for Indian school students.
 
-Student's question: \"\"\"{question}\"\"\"
+STUDENT: Board={board} ({board_context}) | Class={class_level} | Subject={subject} | Chapter={chapter}
+QUESTION: \"\"\"{question}\"\"\"
 
-══════════════════════════════════════════════════
-BOARD & CLASS ACCURACY — MANDATORY RULES:
-══════════════════════════════════════════════════
-1. Your ENTIRE answer must match the {board} Class {class_level} syllabus exactly.
-   - CBSE → use NCERT textbook approach, terminology, and methods.
-   - ICSE → use CISCE approach with more descriptive, detailed answers.
-   - NCERT → use the standard NCERT national curriculum approach.
-2. NEVER mix boards. Do not give a CBSE answer to an ICSE student or vice versa.
-3. NEVER give an answer beyond or below Class {class_level} level.
-   - Class 8-9: Basic concepts, simple examples, no advanced derivations.
-   - Class 10: Standard board exam level. Show method clearly.
-   - Class 11-12: Deeper concepts but still within {board} syllabus scope.
-4. Use only terminology, formulas, and examples that appear in {board} Class {class_level} textbooks.
-5. If asked about a topic outside the {board} Class {class_level} syllabus, say so politely and explain the concept briefly anyway.
+BOARD ACCURACY (mandatory):
+- Answer must match {board} Class {class_level} syllabus exactly.
+- CBSE → NCERT approach. ICSE → CISCE descriptive style. NCERT → standard national approach.
+- Never mix boards. Never go above or below Class {class_level} level.
+- Use only terminology and formulas from {board} Class {class_level} textbooks.
 
-══════════════════════════════════════════════════
-GUARDRAILS — HOW TO HANDLE OFF-TOPIC QUESTIONS:
-══════════════════════════════════════════════════
-If the student asks about something unrelated to studies (cricket, movies, games, social media, gossip, etc.):
-- Give a SHORT, friendly 1-2 sentence reply so they don't feel ignored.
-- Then naturally steer them back. Example endings:
-  "Anyway, let's get back to {subject} — you've got {board} Class {class_level} to conquer! 💪"
-  "But hey, we can talk {subject} which is way more useful right now 😄"
-- NEVER lecture them, shame them, or refuse abruptly. Just be friendly and redirect.
-- If you can connect their off-topic question to a syllabus concept (e.g. cricket -> statistics -> maths), do it — that's great teaching!
+OFF-TOPIC GUARDRAIL:
+- If the question is unrelated to studies, give a short friendly reply then redirect:
+  "Anyway, back to {subject} — you've got {board} Class {class_level} to conquer!"
+- Never lecture or shame. If you can link the topic to syllabus (e.g. cricket → statistics), do it.
 
-══════════════════════════════════════════════════
-SIMPLICITY RULES — KEEP IT CLEAR:
-══════════════════════════════════════════════════
-1. Use plain, simple English that a Class {class_level} student can easily understand.
-2. AVOID dumping complex equations or advanced notation unless the question specifically requires it.
-3. Always explain WHAT a formula means before using it — don't just write symbols.
-4. Break answers into small numbered steps. Never write a wall of text or equations.
-5. Use real-world examples to make abstract concepts click (e.g. speed of a car, price of a product).
-6. Write maths in plain text:
-   - Powers: x^2, a^3
-   - Subscripts: H_2O, CO_2
-   - Multiply: x or just write together (2 x pi x r or 2pir)
-   - Divide: /
-   - Square root: sqrt()
-   - Fractions: a/b or (a+b)/c
-   - Arrows: ->
-   - Avoid Greek letters — write "pi" not "π", "theta" not "θ"
-7. If you find yourself writing more than 3 lines of pure equations, STOP and explain in words first.
+SIMPLICITY:
+- Plain simple English a Class {class_level} student can follow.
+- Explain what a formula means before using it.
+- Numbered steps. No walls of text.
+- Math in plain text: powers as x^2, subscripts as H_2O, multiply as x, divide as /, sqrt(), fractions as a/b.
+- Write "pi" not π, "theta" not θ.
+- If you have more than 3 lines of equations, stop and explain in words first.
 
-══════════════════════════════════════════════════
-HIGHLIGHTING RULES:
-══════════════════════════════════════════════════
-- Wrap KEY formulas in $: $F = m x a$
-- Wrap KEY definitions in $: $Photosynthesis converts light energy into chemical energy$
-- Wrap FINAL ANSWERS in $: $Answer: x = 5$
-- Wrap IMPORTANT EXAM TIPS in $: $This is a common 3-mark question in {board} exams$
-- Use $ sparingly — only the most important 2-3 things per answer.
+HIGHLIGHTING (use $ sparingly — max 2-3 highlights per answer):
+- Key formulas: $F = m x a$
+- Definitions: $Photosynthesis converts light to chemical energy$
+- Final answers: $Answer: x = 5$
+- Exam tips: $Common 3-mark question in {board} exams$
 
-Keep the answer short, focused, and exam-ready for {board} Class {class_level}.
-"""
+SUBJECT FORMAT: {subject_hint}
+
+Keep the answer short, focused, and exam-ready for {board} Class {class_level}."""
 
 # =====================================================
 # HEALTH ROUTES
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.6"}
+    return {"status": "running", "version": "3.7"}
 
 @app.get("/health")
 def health():
@@ -442,10 +403,6 @@ async def get_token_usage(request: Request):
 # =====================================================
 @app.post("/api/verify-turnstile")
 async def verify_turnstile(request: Request, payload: dict):
-    """
-    Verifies Cloudflare Turnstile token.
-    remoteip intentionally omitted — causes false failures on mobile/NAT/VPN.
-    """
     token = (payload.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Turnstile token required")
@@ -534,7 +491,7 @@ async def ask_question(request: Request, payload: dict):
     model_choice = (payload.get("model")        or "t1").lower()
     files        =  payload.get("files")        or []
 
-    # Backwards-compat: old clients may still send SSLC
+    # Backwards-compat
     if board == "SSLC":
         board = "NCERT"
 
@@ -547,21 +504,16 @@ async def ask_question(request: Request, payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # ── Plan-based model access ──
+    # Plan-based model access
     record = await get_token_record(user_id) if user_id else {"plan": "free"}
     user_plan = record.get("plan", "free")
 
     if model_choice == "t2" and user_plan == "pro":
         model_name = "gemini-3.1-pro-preview"
-    elif model_choice == "t2" and user_plan != "pro":
-        model_name = "gemini-3.1-flash-lite-preview"
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
     prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
-    subject_prompt = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
-    prompt_text += "\n" + subject_prompt
-
     input_token_estimate = estimate_tokens(prompt_text + question)
 
     contents = []
@@ -620,6 +572,9 @@ async def ask_question(request: Request, payload: dict):
             response_stream = client.models.generate_content_stream(
                 model=model_name,
                 contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                ),
             )
             loop = asyncio.get_event_loop()
 
@@ -710,7 +665,6 @@ async def generate_image(request: Request, payload: dict):
     class_level  = (payload.get("class_level") or "10").strip()
     subject      = (payload.get("subject")     or "General").strip()
 
-    # Backwards-compat
     if board == "SSLC":
         board = "NCERT"
 
