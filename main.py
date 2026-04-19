@@ -36,9 +36,70 @@ if not TURNSTILE_SECRET_KEY:
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 # =====================================================
+# RAG
+# =====================================================
+EMBED_MODEL    = "text-embedding-004"
+TOP_K_CHUNKS   = 4
+MIN_SIMILARITY = 0.65
+
+_gemini_rag_client = None
+
+def _get_rag_client():
+    global _gemini_rag_client
+    if _gemini_rag_client is None:
+        _gemini_rag_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_rag_client
+
+async def _embed_question(question: str) -> list[float]:
+    loop = asyncio.get_event_loop()
+    def _run():
+        result = _get_rag_client().models.embed_content(
+            model=EMBED_MODEL,
+            contents=[question],
+        )
+        return result.embeddings[0].values
+    return await loop.run_in_executor(None, _run)
+
+async def _retrieve_chunks(embedding, board, class_level, subject) -> list[dict]:
+    payload = {
+        "query_embedding": embedding,
+        "match_count":     TOP_K_CHUNKS,
+        "match_board":     board or None,
+        "match_class":     class_level or None,
+        "match_subject":   subject or None,
+    }
+    async with httpx.AsyncClient(timeout=8) as http:
+        resp = await http.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/match_chunks",
+            headers=_supabase_headers(),
+            json=payload,
+        )
+    if resp.status_code != 200:
+        print(f"[RAG] RPC error {resp.status_code}: {resp.text}")
+        return []
+    return [c for c in resp.json() if c.get("similarity", 0) >= MIN_SIMILARITY]
+
+async def build_rag_context(question, board=None, class_level=None, subject=None) -> str:
+    try:
+        embedding = await _embed_question(question)
+        chunks    = await _retrieve_chunks(embedding, board, class_level, subject)
+        if not chunks:
+            return ""
+        print(f"[RAG] {len(chunks)} chunks retrieved (top: {chunks[0].get('similarity',0):.2f})")
+        lines = ["[TEXTBOOK REFERENCE — use this to ground your answer]"]
+        for i, c in enumerate(chunks, 1):
+            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} ---")
+            lines.append(c["content"])
+        lines.append("\n[END TEXTBOOK REFERENCE]")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[RAG] Error: {e}")
+        return ""
+
+# =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.7")
+app = FastAPI(title="AI Tutor Backend", version="3.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -271,7 +332,7 @@ print(f"[Startup] google-genai version: {_genai_version}")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
-# SYSTEM INSTRUCTION — applied to every request
+# SYSTEM INSTRUCTION
 # =====================================================
 SYSTEM_INSTRUCTION = (
     "You are Teengro, a friendly AI tutor for Indian school students. "
@@ -345,7 +406,6 @@ def get_base_prompt(board, class_level, subject, chapter, question, model_choice
 
     subject_hint = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
 
-    # T1 = short and direct, T2 = thorough and step-by-step
     if model_choice == "t2":
         mode_instruction = (
             "Give a thorough, step-by-step explanation. "
@@ -398,7 +458,7 @@ SUBJECT FORMAT: {subject_hint}"""
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.7"}
+    return {"status": "running", "version": "3.8"}
 
 @app.get("/health")
 def health():
@@ -507,7 +567,6 @@ async def ask_question(request: Request, payload: dict):
     model_choice = (payload.get("model")        or "t1").lower()
     files        =  payload.get("files")        or []
 
-    # Backwards-compat
     if board == "SSLC":
         board = "NCERT"
 
@@ -520,7 +579,6 @@ async def ask_question(request: Request, payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # Plan-based model access
     record = await get_token_record(user_id) if user_id else {"plan": "free"}
     user_plan = record.get("plan", "free")
 
@@ -529,8 +587,10 @@ async def ask_question(request: Request, payload: dict):
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
-    # Pass model_choice into prompt so T1/T2 behavior is baked in
-    prompt_text = get_base_prompt(board, class_level, subject, chapter, question, model_choice)
+    # ── RAG: fetch relevant textbook chunks ──
+    rag_context = await build_rag_context(question, board, class_level, subject)
+    prompt_text = rag_context + "\n\n" + get_base_prompt(board, class_level, subject, chapter, question, model_choice)
+
     input_token_estimate = estimate_tokens(prompt_text + question)
 
     contents = []
