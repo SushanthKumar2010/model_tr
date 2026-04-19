@@ -272,19 +272,21 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
 # SYSTEM INSTRUCTION — applied to every request
-# Keeps the no-asterisks rule out of the user prompt
-# so it costs zero extra tokens per question.
 # =====================================================
 SYSTEM_INSTRUCTION = (
     "You are Teengro, a friendly AI tutor for Indian school students. "
     "FORMATTING RULES — follow these without exception: "
     "NEVER use **asterisks** or markdown bold (**, __, ##, >). "
     "The ONLY way to highlight text is with $dollar signs$ like this: $Answer: x = 3$. "
-    "If you feel like typing **, type $ instead. Asterisks are completely forbidden."
+    "If you feel like typing **, type $ instead. Asterisks are completely forbidden. "
+    "RESPONSE STYLE — follow these without exception: "
+    "Never open with filler phrases like 'Sure!', 'Great question!', 'Of course!', "
+    "'I'd be happy to help', 'Certainly!', or any introductory sentence. "
+    "Start the answer immediately and directly."
 )
 
 # =====================================================
-# SUBJECT-SPECIFIC PROMPTS (trimmed — no repeated bold rule)
+# SUBJECT-SPECIFIC PROMPTS
 # =====================================================
 
 SUBJECT_PROMPTS = {
@@ -332,9 +334,9 @@ SUBJECT_PROMPTS = {
 DEFAULT_SUBJECT_PROMPT = "Explain clearly. Highlight key points like $this$."
 
 # =====================================================
-# BASE PROMPT (tightened — saves ~30% tokens vs original)
+# BASE PROMPT
 # =====================================================
-def get_base_prompt(board, class_level, subject, chapter, question):
+def get_base_prompt(board, class_level, subject, chapter, question, model_choice="t1"):
     board_context = {
         "ICSE": "CISCE curriculum — detailed, descriptive answers.",
         "CBSE": "follows NCERT textbooks — conceptual clarity.",
@@ -343,10 +345,26 @@ def get_base_prompt(board, class_level, subject, chapter, question):
 
     subject_hint = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
 
+    # T1 = short and direct, T2 = thorough and step-by-step
+    if model_choice == "t2":
+        mode_instruction = (
+            "Give a thorough, step-by-step explanation. "
+            "Cover the concept fully — explain the why, not just the what. "
+            "Include examples, common mistakes to avoid, and an exam tip if relevant."
+        )
+    else:
+        mode_instruction = (
+            "Give a short, direct answer. "
+            "Only what's needed to answer the question — no extra context unless essential. "
+            "If it's a definition, one clear sentence. If it's a calculation, just the steps."
+        )
+
     return f"""You are Teengro, a friendly AI tutor for Indian school students.
 
 STUDENT: Board={board} ({board_context}) | Class={class_level} | Subject={subject} | Chapter={chapter}
 QUESTION: \"\"\"{question}\"\"\"
+
+MODE: {mode_instruction}
 
 BOARD ACCURACY (mandatory):
 - Answer must match {board} Class {class_level} syllabus exactly.
@@ -373,9 +391,7 @@ HIGHLIGHTING (use $ sparingly — max 2-3 highlights per answer):
 - Final answers: $Answer: x = 5$
 - Exam tips: $Common 3-mark question in {board} exams$
 
-SUBJECT FORMAT: {subject_hint}
-
-Keep the answer short, focused, and exam-ready for {board} Class {class_level}."""
+SUBJECT FORMAT: {subject_hint}"""
 
 # =====================================================
 # HEALTH ROUTES
@@ -513,7 +529,8 @@ async def ask_question(request: Request, payload: dict):
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
-    prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
+    # Pass model_choice into prompt so T1/T2 behavior is baked in
+    prompt_text = get_base_prompt(board, class_level, subject, chapter, question, model_choice)
     input_token_estimate = estimate_tokens(prompt_text + question)
 
     contents = []
