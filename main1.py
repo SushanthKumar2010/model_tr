@@ -54,11 +54,6 @@ app.add_middleware(
 # =====================================================
 
 class RateLimiter:
-    """
-    Simple in-memory rate limiter. Tracks requests per IP per endpoint.
-    Resets automatically after the window expires.
-    """
-
     def __init__(self):
         self._store: dict[str, list[float]] = defaultdict(list)
 
@@ -108,16 +103,11 @@ def check_rate_limit(request: Request, endpoint: str):
 
 # =====================================================
 # DAILY TOKEN TRACKER — Supabase-backed
-# Reads/writes daily_tokens_used + daily_tokens_date
-# columns on the user_profiles table.
-# Falls back to in-memory if Supabase is unreachable.
 # =====================================================
 
-DAILY_TOKEN_LIMIT = 50_000
-WARNING_THRESHOLDS = [50, 75, 90, 100]
+DEFAULT_TOKEN_LIMIT = 50_000  # fallback if not set in Supabase
+WARNING_THRESHOLDS  = [50, 75, 90, 100]
 
-# In-memory cache to avoid hitting Supabase on every single chunk
-# { user_id: { "date": "YYYY-MM-DD", "tokens_used": int, "warned_at": [50,75] } }
 _token_cache: dict[str, dict] = {}
 
 
@@ -134,10 +124,6 @@ def _supabase_headers() -> dict:
 
 
 async def _load_from_supabase(user_id: str) -> dict:
-    """
-    Fetch daily_tokens_used and daily_tokens_date from user_profiles.
-    Returns a fresh record dict. Falls back to zeroed record on error.
-    """
     today = _today()
     try:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -145,7 +131,7 @@ async def _load_from_supabase(user_id: str) -> dict:
                 f"{SUPABASE_URL}/rest/v1/user_profiles",
                 headers=_supabase_headers(),
                 params={
-                    "select": "daily_tokens_used,daily_tokens_date",
+                    "select": "daily_tokens_used,daily_tokens_date,daily_token_limit,plan,plan_expires_at",
                     "id": f"eq.{user_id}",
                     "limit": "1",
                 },
@@ -154,28 +140,36 @@ async def _load_from_supabase(user_id: str) -> dict:
             rows = resp.json()
             if rows:
                 row = rows[0]
-                db_date = (row.get("daily_tokens_date") or "")[:10]  # strip time if present
+                db_date = (row.get("daily_tokens_date") or "")[:10]
                 tokens_used = row.get("daily_tokens_used") or 0
+                token_limit = row.get("daily_token_limit") or DEFAULT_TOKEN_LIMIT
 
-                # If DB date is today keep the count, otherwise treat as fresh day
-                if db_date == today:
-                    return {
-                        "date": today,
-                        "tokens_used": tokens_used,
-                        "warned_at": [],  # warnings are session-only — no need to persist
-                    }
+                # Check if paid plan is still active
+                plan = row.get("plan") or "free"
+                plan_expires_at = row.get("plan_expires_at")
+                if plan != "free" and plan_expires_at:
+                    from datetime import timezone
+                    expires = datetime.fromisoformat(plan_expires_at.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > expires:
+                        plan = "free"  # plan expired
+
+                # If same day: use stored tokens.
+                # If new day: treat as 0 (resets naturally on first question).
+                tokens_for_today = tokens_used if db_date == today else 0
+                return {
+                    "date": today,
+                    "tokens_used": tokens_for_today,
+                    "token_limit": token_limit,
+                    "plan": plan,
+                    "warned_at": [],
+                }
     except Exception as e:
         print(f"[Token] Supabase load error for {user_id}: {e}")
 
-    # Fresh record (new user, new day, or error)
-    return {"date": today, "tokens_used": 0, "warned_at": []}
+    return {"date": today, "tokens_used": 0, "token_limit": DEFAULT_TOKEN_LIMIT, "plan": "free", "warned_at": []}
 
 
 async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
-    """
-    Persist today's token count back to user_profiles.
-    Fire-and-forget — errors are logged but not raised.
-    """
     today = _today()
     try:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -193,58 +187,53 @@ async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
 
 
 async def get_token_record(user_id: str) -> dict:
-    """
-    Returns the cached record for today, loading from Supabase if needed.
-    """
     today = _today()
-    cached = _token_cache.get(user_id)
 
-    # Cache hit for today
-    if cached and cached["date"] == today:
-        return cached
-
-    # Cache miss or stale day — reload from Supabase
+    # Always load fresh from Supabase so manual DB edits reflect immediately.
+    # In-memory cache is only used as a write buffer, not as a read source.
     record = await _load_from_supabase(user_id)
+
+    # Preserve in-memory warned_at state (session only, no need to persist)
+    cached = _token_cache.get(user_id)
+    if cached and cached["date"] == today:
+        record["warned_at"] = cached.get("warned_at", [])
+
     _token_cache[user_id] = record
     return record
 
 
 async def is_limit_reached(user_id: str) -> bool:
     record = await get_token_record(user_id)
-    return record["tokens_used"] >= DAILY_TOKEN_LIMIT
+    return record["tokens_used"] >= record.get("token_limit", DEFAULT_TOKEN_LIMIT)
 
 
 async def get_usage(user_id: str) -> dict:
     record = await get_token_record(user_id)
     tokens_used = record["tokens_used"]
-    percent = round((tokens_used / DAILY_TOKEN_LIMIT) * 100, 1)
+    token_limit = record.get("token_limit", DEFAULT_TOKEN_LIMIT)
+    percent = round((tokens_used / token_limit) * 100, 1)
     return {
         "tokens_used": tokens_used,
-        "tokens_limit": DAILY_TOKEN_LIMIT,
-        "tokens_remaining": max(0, DAILY_TOKEN_LIMIT - tokens_used),
+        "tokens_limit": token_limit,
+        "tokens_remaining": max(0, token_limit - tokens_used),
         "percent_used": percent,
+        "plan": record.get("plan", "free"),
     }
 
 
 async def add_tokens(user_id: str, count: int) -> list[int]:
-    """
-    Adds tokens to the user's daily count.
-    Updates cache immediately, persists to Supabase asynchronously.
-    Returns list of newly crossed warning thresholds.
-    """
     record = await get_token_record(user_id)
-    old_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
-    record["tokens_used"] = min(record["tokens_used"] + count, DAILY_TOKEN_LIMIT)
-    new_percent = (record["tokens_used"] / DAILY_TOKEN_LIMIT) * 100
+    token_limit = record.get("token_limit", DEFAULT_TOKEN_LIMIT)
+    old_percent = (record["tokens_used"] / token_limit) * 100
+    record["tokens_used"] = min(record["tokens_used"] + count, token_limit)
+    new_percent = (record["tokens_used"] / token_limit) * 100
 
-    # Check warning thresholds
     new_warnings = []
     for threshold in WARNING_THRESHOLDS:
         if old_percent < threshold <= new_percent and threshold not in record["warned_at"]:
             record["warned_at"].append(threshold)
             new_warnings.append(threshold)
 
-    # Persist to Supabase in background (don't await — don't block the stream)
     asyncio.create_task(_save_to_supabase(user_id, record["tokens_used"]))
 
     return new_warnings
@@ -255,19 +244,11 @@ async def add_tokens(user_id: str, count: int) -> list[int]:
 # =====================================================
 
 def _b64url_decode(s: str) -> bytes:
-    """Decode a base64url string (no padding required)."""
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s)
 
 
 def extract_user_id(request: Request) -> str | None:
-    """
-    Extracts and VERIFIES a Supabase JWT from the Authorization header.
-    - Verifies the HMAC-SHA256 signature using SUPABASE_JWT_SECRET
-    - Checks token expiry
-    - Returns the user ID (sub claim) only if the token is valid
-    Falls back to unverified decode if SUPABASE_JWT_SECRET is not set (dev mode).
-    """
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
@@ -281,9 +262,7 @@ def extract_user_id(request: Request) -> str | None:
 
         header_b64, payload_b64, sig_b64 = parts
 
-        # ── Signature verification (if secret is configured) ──
         if SUPABASE_JWT_SECRET:
-            # Reconstruct the signing input
             signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
             expected_sig = hmac.new(
                 SUPABASE_JWT_SECRET.encode("utf-8"),
@@ -292,15 +271,12 @@ def extract_user_id(request: Request) -> str | None:
             ).digest()
             actual_sig = _b64url_decode(sig_b64)
 
-            # Use hmac.compare_digest to prevent timing attacks
             if not hmac.compare_digest(expected_sig, actual_sig):
                 print("[JWT] Signature verification FAILED — token rejected")
                 return None
 
-        # ── Decode payload ──
         payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
 
-        # ── Expiry check ──
         exp = payload.get("exp")
         if exp and datetime.now(timezone.utc).timestamp() > exp:
             print("[JWT] Token expired — rejected")
@@ -314,7 +290,6 @@ def extract_user_id(request: Request) -> str | None:
 
 
 def estimate_tokens(text: str) -> int:
-    """~4 characters per token — good enough for daily budgeting."""
     return max(1, len(text) // 4)
 
 
@@ -328,6 +303,13 @@ SUPPORTED_MIME_TYPES = {
     "application/pdf",
     "text/plain",
 }
+
+import importlib.metadata
+try:
+    _genai_version = importlib.metadata.version("google-genai")
+except Exception:
+    _genai_version = "unknown"
+print(f"[Startup] google-genai version: {_genai_version}")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -436,7 +418,9 @@ async def get_token_usage(request: Request):
 async def verify_turnstile(request: Request, payload: dict):
     """
     Verifies a Cloudflare Turnstile token.
-    Called by login and signup forms before submitting to Supabase.
+    NOTE: remoteip is intentionally omitted — passing it caused false failures
+    on mobile/NAT/VPN devices where the IP seen by the backend differs from
+    the IP Cloudflare recorded when the user completed the challenge.
     """
     token = (payload.get("token") or "").strip()
     if not token:
@@ -449,7 +433,6 @@ async def verify_turnstile(request: Request, payload: dict):
                 data={
                     "secret": TURNSTILE_SECRET_KEY,
                     "response": token,
-                    "remoteip": limiter.get_ip(request),
                 },
             )
         result = resp.json()
@@ -514,13 +497,10 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
 @app.post("/api/ask")
 async def ask_question(request: Request, payload: dict):
 
-    # ── IP rate limit ──
     check_rate_limit(request, "ask")
 
-    # ── Auth: optional — token tracking skipped if not logged in ──
     user_id = extract_user_id(request)
 
-    # ── Block if daily limit already reached ──
     if user_id and await is_limit_reached(user_id):
         usage = await get_usage(user_id)
         raise HTTPException(
@@ -530,6 +510,7 @@ async def ask_question(request: Request, payload: dict):
                 "message": "You've used your daily question limit. It resets at midnight UTC.",
                 "tokens_used": usage["tokens_used"],
                 "tokens_limit": usage["tokens_limit"],
+                "tokens_remaining": usage["tokens_remaining"],
                 "resets_at": "midnight UTC",
             }
         )
@@ -551,21 +532,24 @@ async def ask_question(request: Request, payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # ── Model select ──
-    if model_choice == "t2":
+    # ── Plan-based model access ──
+    record = await get_token_record(user_id) if user_id else {"plan": "free"}
+    user_plan = record.get("plan", "free")
+
+    if model_choice == "t2" and user_plan == "pro":
         model_name = "gemini-3.1-pro-preview"
+    elif model_choice == "t2" and user_plan != "pro":
+        # Free user trying to use T2 — silently fall back to T1
+        model_name = "gemini-3.1-flash-lite-preview"
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
-    # ── Build prompt ──
     prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
     subject_prompt = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
     prompt_text += "\n" + subject_prompt
 
-    # ── Estimate input tokens ──
     input_token_estimate = estimate_tokens(prompt_text + question)
 
-    # ── Process files ──
     contents = []
     uploaded_file_uris = []
     file_errors = []
@@ -619,7 +603,6 @@ async def ask_question(request: Request, payload: dict):
 
     contents.append(types.Part.from_text(text=prompt_text))
 
-    # ── Stream response ──
     async def stream():
         output_chars = 0
 
@@ -653,7 +636,6 @@ async def ask_question(request: Request, payload: dict):
                         raise chunk_error
                     break
 
-            # ── Tally tokens, persist to Supabase, send usage event ──
             output_token_estimate = estimate_tokens(" " * output_chars)
             total_tokens = input_token_estimate + output_token_estimate
 
@@ -698,7 +680,7 @@ async def ask_question(request: Request, payload: dict):
     )
 
 # =====================================================
-# IMAGE GENERATION ROUTE (rate limited + token tracked)
+# IMAGE GENERATION ROUTE
 # =====================================================
 @app.post("/api/generate-image")
 async def generate_image(request: Request, payload: dict):
@@ -706,8 +688,10 @@ async def generate_image(request: Request, payload: dict):
     check_rate_limit(request, "generate_image")
 
     user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
-    if user_id and await is_limit_reached(user_id):
+    if await is_limit_reached(user_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -716,33 +700,76 @@ async def generate_image(request: Request, payload: dict):
             }
         )
 
-    prompt = (payload.get("prompt") or "").strip()
-    if not prompt:
+    raw_prompt   = (payload.get("prompt")      or "").strip()
+    board        = (payload.get("board")       or "ICSE").strip().upper()
+    class_level  = (payload.get("class_level") or "10").strip()
+    subject      = (payload.get("subject")     or "General").strip()
+
+    if not raw_prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
+    # ── Prompt engineering — always produce clean, textbook-style diagrams ──
+    engineered_prompt = f"""
+Create an accurate educational diagram for {board} Class {class_level} {subject}.
+Topic: {raw_prompt}
+
+CRITICAL TEXT ACCURACY REQUIREMENTS (most important):
+- Every single word, label, formula, and term must be spelled PERFECTLY and be scientifically correct
+- Double-check all spelling before rendering — no typos allowed whatsoever
+- Use only standard, correct terminology as taught in {board} Class {class_level} textbooks
+- All mathematical symbols, formulas, and equations must be 100% accurate
+- Labels must use the exact correct English spelling (e.g. "Hypotenuse" not "Hypotunse", "Adjacent" not "Adjecent", "Opposite" not "Oppoite")
+
+Style requirements:
+- Clean, minimal, flat design — like a professional textbook or Khan Academy illustration
+- White background
+- Clear, readable labels in simple sans-serif font
+- Crisp lines and shapes, no textures or noise
+- Muted colours (blues, teals, soft greens) — no neon or gradients
+- No photorealism, no 3D rendering, no shading
+- Include a clear, correctly spelled title and all important labels
+- Plenty of whitespace, uncluttered layout
+""".strip()
+
     try:
-        response = client.models.generate_images(
-            model="imagen-3.0-generate-002",
-            prompt=prompt,
-            config=types.GenerateImagesConfig(number_of_images=1),
+        # Use gemini-2.5-flash-preview-05-20 for image generation via generate_content
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-image-preview",
+            contents=engineered_prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+            ),
         )
 
-        image_bytes = response.generated_images[0].image.image_bytes
+        # Extract image bytes from response
+        image_bytes = None
+        mime_type = "image/png"
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data
+                mime_type = part.inline_data.mime_type or "image/png"
+                break
+
+        if not image_bytes:
+            raise Exception("No image returned in response")
+
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        # Flat 500 token cost for image generation
         if user_id:
             await add_tokens(user_id, 500)
 
         return {
             "image": b64_image,
-            "mime_type": "image/png",
+            "mime_type": mime_type,
         }
 
     except Exception as e:
         error_msg = str(e)
-        if "quota" in error_msg.lower():
+        print(f"[ImageGen] Error: {error_msg}")
+        if "quota" in error_msg.lower() or "429" in error_msg:
             raise HTTPException(status_code=429, detail="Image generation quota exceeded.")
+        if "safety" in error_msg.lower() or "block" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="Image blocked by safety filter. Try rephrasing your request.")
         raise HTTPException(status_code=500, detail=f"Image generation failed: {error_msg}")
 
 # =====================================================
