@@ -278,53 +278,64 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 SUBJECT_PROMPTS = {
     "Maths": """
 Show step-by-step working. Write numbers and operations clearly in plain text (e.g. 2 x 3 = 6, x^2 + 5x + 6 = 0).
-Avoid complex notation. Highlight the final answer: $Answer: x = 3$
+Avoid complex notation. Highlight the final answer like $Answer: x = 3$
 Keep it simple — if a student can understand it without advanced notation, write it that way.
 Break each step onto its own line so it is easy to follow.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Physics": """
 Format: Given -> Formula -> Calculation -> Answer with units.
 Write formulas in plain text (e.g. F = m x a, v^2 = u^2 + 2as).
 Only show the formula that is actually needed — do not dump every related formula.
-Highlight key formulas and final answers.
+Highlight key formulas like $F = m x a$ and final answers like $Answer: 10 N$.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Chemistry": """
 Balance equations. Use -> for reactions (e.g. 2H_2 + O_2 -> 2H_2O).
 Write subscripts with _ (e.g. H_2O, CO_2). Keep explanations straightforward.
-Highlight important reactions and definitions.
+Highlight important reactions like $2H_2 + O_2 -> 2H_2O$ and key definitions.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Biology": """
-Highlight key definitions: $Mitosis is the process of cell division$
+Highlight key definitions like $Mitosis is the process of cell division$.
 Explain processes step by step in simple language. No jargon without explanation.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "English Literature": """
-Reference the text. Highlight key themes: $The poem explores the theme of loss and longing$
+Reference the text. Highlight key themes like $The poem explores the theme of loss and longing$.
 Use clear, simple language a student can reproduce in an exam answer.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "English Grammar": """
 State the rule clearly first. Then give a simple example.
-Highlight correct forms: $Passive voice: The cake was eaten by him$
+Highlight correct forms like $Passive voice: The cake was eaten by him$.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "History": """
-Include dates and context. Highlight key facts: $The French Revolution began in 1789$
+Include dates and context. Highlight key facts like $The French Revolution began in 1789$.
 Keep cause-effect explanations concise.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Economics": """
-Define terms first. Highlight definitions: $GDP is the total value of goods and services produced$
+Define terms first. Highlight definitions like $GDP is the total value of goods and services produced$.
 Use real-world examples where helpful.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Geography": """
-Include location context. Highlight key facts: $The Himalayas are young fold mountains$
+Include location context. Highlight key facts like $The Himalayas are young fold mountains$.
 Use simple descriptions instead of technical jargon where possible.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """,
     "Computer Applications": """
-Write code in plain text with proper indentation. Highlight syntax: $int x = 5;$
+Write code in plain text with proper indentation. Highlight syntax like $int x = 5;$.
 Explain what each line does in simple terms.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """
 }
 
 DEFAULT_SUBJECT_PROMPT = """
-- For key terms or important highlights, wrap in $like this$ — never use **bold**
+Explain clearly using simple language. Highlight key points with $dollar signs like this$.
+IMPORTANT: Use $dollar signs$ to highlight key terms and answers — never use **asterisks** for bold.
 """
 
 # =====================================================
