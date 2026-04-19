@@ -324,7 +324,7 @@ Explain what each line does in simple terms.
 }
 
 DEFAULT_SUBJECT_PROMPT = """
-Explain clearly using simple language. Highlight key points with $...$
+- For key terms or important highlights, wrap in $like this$ — never use **bold**
 """
 
 # =====================================================
