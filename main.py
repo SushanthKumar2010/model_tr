@@ -38,7 +38,8 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 # =====================================================
 # RAG
 # =====================================================
-EMBED_MODEL    = "text-embedding-004"
+EMBED_MODEL    = "models/gemini-embedding-001"   # MUST match ingest.py
+EMBED_DIMS     = 768                             # MUST match ingest.py
 TOP_K_CHUNKS   = 4
 MIN_SIMILARITY = 0.65
 
@@ -56,6 +57,7 @@ async def _embed_question(question: str) -> list[float]:
         result = _get_rag_client().models.embed_content(
             model=EMBED_MODEL,
             contents=[question],
+            config={"output_dimensionality": EMBED_DIMS},
         )
         return result.embeddings[0].values
     return await loop.run_in_executor(None, _run)
@@ -77,18 +79,22 @@ async def _retrieve_chunks(embedding, board, class_level, subject) -> list[dict]
     if resp.status_code != 200:
         print(f"[RAG] RPC error {resp.status_code}: {resp.text}")
         return []
-    return [c for c in resp.json() if c.get("similarity", 0) >= MIN_SIMILARITY]
+    rows = resp.json()
+    print(f"[RAG] RPC returned {len(rows)} raw chunks; similarities: "
+          f"{[round(r.get('similarity', 0), 2) for r in rows[:5]]}")
+    return [c for c in rows if c.get("similarity", 0) >= MIN_SIMILARITY]
 
 async def build_rag_context(question, board=None, class_level=None, subject=None) -> str:
     try:
         embedding = await _embed_question(question)
         chunks    = await _retrieve_chunks(embedding, board, class_level, subject)
         if not chunks:
+            print(f"[RAG] No chunks above threshold ({MIN_SIMILARITY}) — no context added")
             return ""
-        print(f"[RAG] {len(chunks)} chunks retrieved (top: {chunks[0].get('similarity',0):.2f})")
+        print(f"[RAG] {len(chunks)} chunks passed threshold (top: {chunks[0].get('similarity',0):.2f})")
         lines = ["[TEXTBOOK REFERENCE — use this to ground your answer]"]
         for i, c in enumerate(chunks, 1):
-            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} ---")
+            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} {c.get('chapter','')} ---")
             lines.append(c["content"])
         lines.append("\n[END TEXTBOOK REFERENCE]")
         return "\n".join(lines)
@@ -99,7 +105,7 @@ async def build_rag_context(question, board=None, class_level=None, subject=None
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.8")
+app = FastAPI(title="AI Tutor Backend", version="3.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -458,7 +464,7 @@ SUBJECT FORMAT: {subject_hint}"""
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.8"}
+    return {"status": "running", "version": "3.9"}
 
 @app.get("/health")
 def health():
