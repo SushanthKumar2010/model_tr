@@ -49,8 +49,8 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 # =====================================================
 EMBED_MODEL    = "models/gemini-embedding-001"   # MUST match ingest.py
 EMBED_DIMS     = 768                             # MUST match ingest.py
-TOP_K_CHUNKS   = 4
-MIN_SIMILARITY = 0.65
+TOP_K_CHUNKS   = 6                               # more chunks for better grounding
+MIN_SIMILARITY = 0.5                             # gemini-embedding-001 produces lower scores than OpenAI
 
 _gemini_rag_client = None
 
@@ -125,7 +125,7 @@ async def build_rag_context(question, board=None, class_level=None, subject=None
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.10")
+app = FastAPI(title="AI Tutor Backend", version="3.11")
 
 app.add_middleware(
     CORSMiddleware,
@@ -484,7 +484,7 @@ SUBJECT FORMAT: {subject_hint}"""
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.10"}
+    return {"status": "running", "version": "3.11"}
 
 @app.get("/health")
 def health():
