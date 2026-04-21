@@ -24,7 +24,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # use service role key — not anon
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables must be set")
@@ -33,14 +33,73 @@ TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
 if not TURNSTILE_SECRET_KEY:
     raise RuntimeError("TURNSTILE_SECRET_KEY environment variable not set")
 
-# Supabase JWT secret — used to verify token signatures
-# Get from: Supabase Dashboard → Settings → API → JWT Secret
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+# =====================================================
+# RAG
+# =====================================================
+EMBED_MODEL    = "text-embedding-004"
+TOP_K_CHUNKS   = 4
+MIN_SIMILARITY = 0.65
+
+_gemini_rag_client = None
+
+def _get_rag_client():
+    global _gemini_rag_client
+    if _gemini_rag_client is None:
+        _gemini_rag_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_rag_client
+
+async def _embed_question(question: str) -> list[float]:
+    loop = asyncio.get_event_loop()
+    def _run():
+        result = _get_rag_client().models.embed_content(
+            model=EMBED_MODEL,
+            contents=[question],
+        )
+        return result.embeddings[0].values
+    return await loop.run_in_executor(None, _run)
+
+async def _retrieve_chunks(embedding, board, class_level, subject) -> list[dict]:
+    payload = {
+        "query_embedding": embedding,
+        "match_count":     TOP_K_CHUNKS,
+        "match_board":     board or None,
+        "match_class":     class_level or None,
+        "match_subject":   subject or None,
+    }
+    async with httpx.AsyncClient(timeout=8) as http:
+        resp = await http.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/match_chunks",
+            headers=_supabase_headers(),
+            json=payload,
+        )
+    if resp.status_code != 200:
+        print(f"[RAG] RPC error {resp.status_code}: {resp.text}")
+        return []
+    return [c for c in resp.json() if c.get("similarity", 0) >= MIN_SIMILARITY]
+
+async def build_rag_context(question, board=None, class_level=None, subject=None) -> str:
+    try:
+        embedding = await _embed_question(question)
+        chunks    = await _retrieve_chunks(embedding, board, class_level, subject)
+        if not chunks:
+            return ""
+        print(f"[RAG] {len(chunks)} chunks retrieved (top: {chunks[0].get('similarity',0):.2f})")
+        lines = ["[TEXTBOOK REFERENCE — use this to ground your answer]"]
+        for i, c in enumerate(chunks, 1):
+            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} ---")
+            lines.append(c["content"])
+        lines.append("\n[END TEXTBOOK REFERENCE]")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[RAG] Error: {e}")
+        return ""
 
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.5")
+app = FastAPI(title="AI Tutor Backend", version="3.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,7 +109,7 @@ app.add_middleware(
 )
 
 # =====================================================
-# RATE LIMITER (per IP, per endpoint)
+# RATE LIMITER
 # =====================================================
 
 class RateLimiter:
@@ -60,12 +119,10 @@ class RateLimiter:
     def is_allowed(self, key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
         now = time.time()
         self._store[key] = [t for t in self._store[key] if now - t < window_seconds]
-
         if len(self._store[key]) >= max_requests:
             oldest = self._store[key][0]
             retry_after = int(window_seconds - (now - oldest)) + 1
             return False, retry_after
-
         self._store[key].append(now)
         return True, 0
 
@@ -79,35 +136,30 @@ class RateLimiter:
 limiter = RateLimiter()
 
 LIMITS = {
-    "ask"            : (15, 60),    # 15 AI queries per minute per IP
-    "generate_image" : (5,  60),    # 5 image generations per minute per IP
-    "login"          : (5,  900),   # 5 attempts per 15 minutes per IP
-    "signup"         : (3,  3600),  # 3 signups per hour per IP
-    "reset_password" : (3,  3600),  # 3 resets per hour per IP
+    "ask"            : (15, 60),
+    "generate_image" : (5,  60),
+    "login"          : (5,  900),
+    "signup"         : (3,  3600),
+    "reset_password" : (3,  3600),
 }
 
 def check_rate_limit(request: Request, endpoint: str):
     ip = limiter.get_ip(request)
     max_req, window = LIMITS[endpoint]
     allowed, retry_after = limiter.is_allowed(f"{endpoint}:{ip}", max_req, window)
-
     if not allowed:
         raise HTTPException(
             status_code=429,
-            detail={
-                "error": "Too many requests. Please slow down.",
-                "retry_after_seconds": retry_after,
-            },
+            detail={"error": "Too many requests. Please slow down.", "retry_after_seconds": retry_after},
             headers={"Retry-After": str(retry_after)},
         )
 
 # =====================================================
-# DAILY TOKEN TRACKER — Supabase-backed
+# DAILY TOKEN TRACKER
 # =====================================================
 
-DEFAULT_TOKEN_LIMIT = 50_000  # fallback if not set in Supabase
+DEFAULT_TOKEN_LIMIT = 50_000
 WARNING_THRESHOLDS  = [50, 75, 90, 100]
-
 _token_cache: dict[str, dict] = {}
 
 
@@ -143,29 +195,16 @@ async def _load_from_supabase(user_id: str) -> dict:
                 db_date = (row.get("daily_tokens_date") or "")[:10]
                 tokens_used = row.get("daily_tokens_used") or 0
                 token_limit = row.get("daily_token_limit") or DEFAULT_TOKEN_LIMIT
-
-                # Check if paid plan is still active
                 plan = row.get("plan") or "free"
                 plan_expires_at = row.get("plan_expires_at")
                 if plan != "free" and plan_expires_at:
-                    from datetime import timezone
                     expires = datetime.fromisoformat(plan_expires_at.replace("Z", "+00:00"))
                     if datetime.now(timezone.utc) > expires:
-                        plan = "free"  # plan expired
-
-                # If same day: use stored tokens.
-                # If new day: treat as 0 (resets naturally on first question).
+                        plan = "free"
                 tokens_for_today = tokens_used if db_date == today else 0
-                return {
-                    "date": today,
-                    "tokens_used": tokens_for_today,
-                    "token_limit": token_limit,
-                    "plan": plan,
-                    "warned_at": [],
-                }
+                return {"date": today, "tokens_used": tokens_for_today, "token_limit": token_limit, "plan": plan, "warned_at": []}
     except Exception as e:
         print(f"[Token] Supabase load error for {user_id}: {e}")
-
     return {"date": today, "tokens_used": 0, "token_limit": DEFAULT_TOKEN_LIMIT, "plan": "free", "warned_at": []}
 
 
@@ -177,10 +216,7 @@ async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
                 f"{SUPABASE_URL}/rest/v1/user_profiles",
                 headers=_supabase_headers(),
                 params={"id": f"eq.{user_id}"},
-                json={
-                    "daily_tokens_used": tokens_used,
-                    "daily_tokens_date": today,
-                },
+                json={"daily_tokens_used": tokens_used, "daily_tokens_date": today},
             )
     except Exception as e:
         print(f"[Token] Supabase save error for {user_id}: {e}")
@@ -188,16 +224,10 @@ async def _save_to_supabase(user_id: str, tokens_used: int) -> None:
 
 async def get_token_record(user_id: str) -> dict:
     today = _today()
-
-    # Always load fresh from Supabase so manual DB edits reflect immediately.
-    # In-memory cache is only used as a write buffer, not as a read source.
     record = await _load_from_supabase(user_id)
-
-    # Preserve in-memory warned_at state (session only, no need to persist)
     cached = _token_cache.get(user_id)
     if cached and cached["date"] == today:
         record["warned_at"] = cached.get("warned_at", [])
-
     _token_cache[user_id] = record
     return record
 
@@ -227,15 +257,12 @@ async def add_tokens(user_id: str, count: int) -> list[int]:
     old_percent = (record["tokens_used"] / token_limit) * 100
     record["tokens_used"] = min(record["tokens_used"] + count, token_limit)
     new_percent = (record["tokens_used"] / token_limit) * 100
-
     new_warnings = []
     for threshold in WARNING_THRESHOLDS:
         if old_percent < threshold <= new_percent and threshold not in record["warned_at"]:
             record["warned_at"].append(threshold)
             new_warnings.append(threshold)
-
     asyncio.create_task(_save_to_supabase(user_id, record["tokens_used"]))
-
     return new_warnings
 
 
@@ -252,16 +279,12 @@ def extract_user_id(request: Request) -> str | None:
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
-
     token = auth_header.split(" ", 1)[1]
-
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
-
         header_b64, payload_b64, sig_b64 = parts
-
         if SUPABASE_JWT_SECRET:
             signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
             expected_sig = hmac.new(
@@ -270,20 +293,15 @@ def extract_user_id(request: Request) -> str | None:
                 hashlib.sha256,
             ).digest()
             actual_sig = _b64url_decode(sig_b64)
-
             if not hmac.compare_digest(expected_sig, actual_sig):
                 print("[JWT] Signature verification FAILED — token rejected")
                 return None
-
         payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
-
         exp = payload.get("exp")
         if exp and datetime.now(timezone.utc).timestamp() > exp:
             print("[JWT] Token expired — rejected")
             return None
-
         return payload.get("sub")
-
     except Exception as e:
         print(f"[JWT] Error: {e}")
         return None
@@ -296,7 +314,7 @@ def estimate_tokens(text: str) -> int:
 # =====================================================
 # CONFIG
 # =====================================================
-ALLOWED_BOARDS = {"ICSE", "CBSE", "SSLC"}
+ALLOWED_BOARDS = {"ICSE", "CBSE", "NCERT"}
 
 SUPPORTED_MIME_TYPES = {
     "image/jpeg", "image/png", "image/gif", "image/webp",
@@ -314,91 +332,137 @@ print(f"[Startup] google-genai version: {_genai_version}")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # =====================================================
+# SYSTEM INSTRUCTION
+# =====================================================
+SYSTEM_INSTRUCTION = (
+    "You are Teengro, a friendly AI tutor for Indian school students. "
+    "FORMATTING RULES — follow these without exception: "
+    "NEVER use **asterisks** or markdown bold (**, __, ##, >). "
+    "The ONLY way to highlight text is with $dollar signs$ like this: $Answer: x = 3$. "
+    "If you feel like typing **, type $ instead. Asterisks are completely forbidden. "
+    "RESPONSE STYLE — follow these without exception: "
+    "Never open with filler phrases like 'Sure!', 'Great question!', 'Of course!', "
+    "'I'd be happy to help', 'Certainly!', or any introductory sentence. "
+    "Start the answer immediately and directly."
+)
+
+# =====================================================
 # SUBJECT-SPECIFIC PROMPTS
 # =====================================================
 
 SUBJECT_PROMPTS = {
-    "Maths": """
-Show working steps. Highlight final answer: $x = 5$
-""",
-    "Physics": """
-Format: Given -> Formula -> Calculation -> $Answer with units$
-Highlight key formulas and definitions.
-""",
-    "Chemistry": """
-Balance equations. Use -> for reactions. Example: 2H_2 + O_2 -> 2H_2O
-Highlight important reactions and definitions.
-""",
-    "Biology": """
-Highlight key definitions: $Mitosis is the process of cell division$
-Explain processes step by step.
-""",
-    "English Literature": """
-Reference the text. Highlight key themes: $The poem explores the theme of loss and longing$
-""",
-    "English Grammar": """
-State the rule. Highlight correct forms: $The passive voice is: The cake was eaten by him$
-""",
-    "History": """
-Include dates. Highlight key facts: $The French Revolution began in 1789$
-""",
-    "Economics": """
-Define terms. Highlight definitions: $GDP is the total value of goods and services produced$
-""",
-    "Geography": """
-Include location context. Highlight key facts: $The Himalayas are young fold mountains$
-""",
-    "Computer Applications": """
-Write code in plain text. Highlight syntax: $int x = 5;$
-"""
+    "Maths": (
+        "Show step-by-step working in plain text (e.g. 2 x 3 = 6, x^2 + 5x + 6 = 0). "
+        "Highlight final answer like $Answer: x = 3$. Break each step onto its own line."
+    ),
+    "Physics": (
+        "Format: Given → Formula → Calculation → Answer with units. "
+        "Write formulas in plain text (e.g. F = m x a). "
+        "Highlight key formula like $F = m x a$ and final answer like $Answer: 10 N$."
+    ),
+    "Chemistry": (
+        "Balance equations. Use -> for reactions (e.g. 2H_2 + O_2 -> 2H_2O). "
+        "Write subscripts with _ (e.g. H_2O). "
+        "Highlight reactions like $2H_2 + O_2 -> 2H_2O$."
+    ),
+    "Biology": (
+        "Highlight key definitions like $Mitosis is cell division$. "
+        "Explain step by step in simple language."
+    ),
+    "English Literature": (
+        "Reference the text. Highlight themes like $The poem explores loss$. "
+        "Use clear language a student can reproduce in an exam."
+    ),
+    "English Grammar": (
+        "State the rule first, then give a simple example. "
+        "Highlight correct forms like $Passive: The cake was eaten by him$."
+    ),
+    "History": (
+        "Include dates and context. Highlight key facts like $French Revolution began in 1789$."
+    ),
+    "Economics": (
+        "Define terms first. Highlight like $GDP is total value of goods and services produced$."
+    ),
+    "Geography": (
+        "Include location context. Highlight like $Himalayas are young fold mountains$."
+    ),
+    "Computer Applications": (
+        "Write code with proper indentation. Highlight syntax like $int x = 5;$. "
+        "Explain each line simply."
+    ),
 }
 
-DEFAULT_SUBJECT_PROMPT = """
-Explain clearly. Highlight key points with $...$
-"""
+DEFAULT_SUBJECT_PROMPT = "Explain clearly. Highlight key points like $this$."
 
 # =====================================================
 # BASE PROMPT
 # =====================================================
-def get_base_prompt(board, class_level, subject, chapter, question):
-    return f"""You are a {board} Class {class_level} {subject} teacher.
+def get_base_prompt(board, class_level, subject, chapter, question, model_choice="t1"):
+    board_context = {
+        "ICSE": "CISCE curriculum — detailed, descriptive answers.",
+        "CBSE": "follows NCERT textbooks — conceptual clarity.",
+        "NCERT": "standard national curriculum used across India.",
+    }.get(board, board)
 
-Student asked: \"\"\"{question}\"\"\"
+    subject_hint = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
 
-FORMATTING RULES:
-- Plain text only. No LaTeX, no Markdown, no HTML.
-- Powers: use ^ like x^2, a^3, r^2
-- Subscripts: use _ like H_2O, a_n, x_1
-- Arrows: use -> for reactions
-- Greek letters: write as words (pi, theta, alpha)
-- Square root: write as sqrt() like sqrt(2)
-- Fractions: write as a/b or (a+b)/c
-- Multiply: use x or just write together (2 x pi x r or 2pir)
+    if model_choice == "t2":
+        mode_instruction = (
+            "Give a thorough, step-by-step explanation. "
+            "Cover the concept fully — explain the why, not just the what. "
+            "Include examples, common mistakes to avoid, and an exam tip if relevant."
+        )
+    else:
+        mode_instruction = (
+            "Give a short, direct answer. "
+            "Only what's needed to answer the question — no extra context unless essential. "
+            "If it's a definition, one clear sentence. If it's a calculation, just the steps."
+        )
 
-HIGHLIGHTING with $ signs:
-- Wrap KEY formulas: $x = (-b + sqrt(b^2 - 4ac)) / 2a$
-- Wrap KEY definitions: $Photosynthesis is the process by which plants make food using sunlight$
-- Wrap FINAL answers: $The answer is 25 cm$
-- Wrap IMPORTANT points: $This is a very common exam question$
-- Use sparingly - only the most important stuff
+    return f"""You are Teengro, a friendly AI tutor for Indian school students.
 
-Keep answer short, clear, exam-focused for {board} Class {class_level}.
-"""
+STUDENT: Board={board} ({board_context}) | Class={class_level} | Subject={subject} | Chapter={chapter}
+QUESTION: \"\"\"{question}\"\"\"
+
+MODE: {mode_instruction}
+
+BOARD ACCURACY (mandatory):
+- Answer must match {board} Class {class_level} syllabus exactly.
+- CBSE → NCERT approach. ICSE → CISCE descriptive style. NCERT → standard national approach.
+- Never mix boards. Never go above or below Class {class_level} level.
+- Use only terminology and formulas from {board} Class {class_level} textbooks.
+
+OFF-TOPIC GUARDRAIL:
+- If the question is unrelated to studies, give a short friendly reply then redirect:
+  "Anyway, back to {subject} — you've got {board} Class {class_level} to conquer!"
+- Never lecture or shame. If you can link the topic to syllabus (e.g. cricket → statistics), do it.
+
+SIMPLICITY:
+- Plain simple English a Class {class_level} student can follow.
+- Explain what a formula means before using it.
+- Numbered steps. No walls of text.
+- Math in plain text: powers as x^2, subscripts as H_2O, multiply as x, divide as /, sqrt(), fractions as a/b.
+- Write "pi" not π, "theta" not θ.
+- If you have more than 3 lines of equations, stop and explain in words first.
+
+HIGHLIGHTING (use $ sparingly — max 2-3 highlights per answer):
+- Key formulas: $F = m x a$
+- Definitions: $Photosynthesis converts light to chemical energy$
+- Final answers: $Answer: x = 5$
+- Exam tips: $Common 3-mark question in {board} exams$
+
+SUBJECT FORMAT: {subject_hint}"""
 
 # =====================================================
 # HEALTH ROUTES
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.5"}
+    return {"status": "running", "version": "3.8"}
 
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "api_key_present": bool(GEMINI_API_KEY),
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"status": "healthy", "api_key_present": bool(GEMINI_API_KEY), "timestamp": datetime.utcnow().isoformat()}
 
 # =====================================================
 # TOKEN USAGE ROUTE
@@ -408,7 +472,6 @@ async def get_token_usage(request: Request):
     user_id = extract_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
-
     return await get_usage(user_id)
 
 # =====================================================
@@ -416,24 +479,14 @@ async def get_token_usage(request: Request):
 # =====================================================
 @app.post("/api/verify-turnstile")
 async def verify_turnstile(request: Request, payload: dict):
-    """
-    Verifies a Cloudflare Turnstile token.
-    NOTE: remoteip is intentionally omitted — passing it caused false failures
-    on mobile/NAT/VPN devices where the IP seen by the backend differs from
-    the IP Cloudflare recorded when the user completed the challenge.
-    """
     token = (payload.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Turnstile token required")
-
     try:
         async with httpx.AsyncClient(timeout=10) as http:
             resp = await http.post(
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-                data={
-                    "secret": TURNSTILE_SECRET_KEY,
-                    "response": token,
-                },
+                data={"secret": TURNSTILE_SECRET_KEY, "response": token},
             )
         result = resp.json()
         return {"success": result.get("success", False)}
@@ -464,19 +517,13 @@ async def reset_password(request: Request, payload: dict):
 # =====================================================
 async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
     import io
-
     try:
         file_obj = io.BytesIO(raw_bytes)
         file_obj.name = name
-
         uploaded = client.files.upload(
             file=file_obj,
-            config=types.UploadFileConfig(
-                mime_type=mime_type,
-                display_name=name,
-            )
+            config=types.UploadFileConfig(mime_type=mime_type, display_name=name)
         )
-
         max_attempts = 30
         for attempt in range(max_attempts):
             if uploaded.state.name == "ACTIVE":
@@ -485,9 +532,7 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
                 raise Exception(f"File processing failed: {name}")
             await asyncio.sleep(1)
             uploaded = client.files.get(name=uploaded.name)
-
         raise Exception(f"File processing timeout for: {name}")
-
     except Exception as e:
         raise Exception(f"Failed to upload {name}: {str(e)}")
 
@@ -498,7 +543,6 @@ async def upload_file_to_gemini(raw_bytes: bytes, mime_type: str, name: str):
 async def ask_question(request: Request, payload: dict):
 
     check_rate_limit(request, "ask")
-
     user_id = extract_user_id(request)
 
     if user_id and await is_limit_reached(user_id):
@@ -515,7 +559,7 @@ async def ask_question(request: Request, payload: dict):
             }
         )
 
-    board        = (payload.get("board")        or "ICSE").strip().upper()
+    board        = (payload.get("board")        or "CBSE").strip().upper()
     class_level  = (payload.get("class_level")  or "10").strip()
     subject      = (payload.get("subject")      or "General").strip()
     chapter      = (payload.get("chapter")      or "General").strip()
@@ -523,8 +567,11 @@ async def ask_question(request: Request, payload: dict):
     model_choice = (payload.get("model")        or "t1").lower()
     files        =  payload.get("files")        or []
 
+    if board == "SSLC":
+        board = "NCERT"
+
     if board not in ALLOWED_BOARDS:
-        raise HTTPException(status_code=400, detail="Invalid board")
+        raise HTTPException(status_code=400, detail=f"Invalid board. Must be one of: {', '.join(ALLOWED_BOARDS)}")
 
     if not question and not files:
         raise HTTPException(status_code=400, detail="Question or file required")
@@ -532,21 +579,17 @@ async def ask_question(request: Request, payload: dict):
     if not question and files:
         question = "Please analyse this and answer any questions based on it."
 
-    # ── Plan-based model access ──
     record = await get_token_record(user_id) if user_id else {"plan": "free"}
     user_plan = record.get("plan", "free")
 
     if model_choice == "t2" and user_plan == "pro":
         model_name = "gemini-3.1-pro-preview"
-    elif model_choice == "t2" and user_plan != "pro":
-        # Free user trying to use T2 — silently fall back to T1
-        model_name = "gemini-3.1-flash-lite-preview"
     else:
         model_name = "gemini-3.1-flash-lite-preview"
 
-    prompt_text = get_base_prompt(board, class_level, subject, chapter, question)
-    subject_prompt = SUBJECT_PROMPTS.get(subject, DEFAULT_SUBJECT_PROMPT)
-    prompt_text += "\n" + subject_prompt
+    # ── RAG: fetch relevant textbook chunks ──
+    rag_context = await build_rag_context(question, board, class_level, subject)
+    prompt_text = rag_context + "\n\n" + get_base_prompt(board, class_level, subject, chapter, question, model_choice)
 
     input_token_estimate = estimate_tokens(prompt_text + question)
 
@@ -561,7 +604,6 @@ async def ask_question(request: Request, payload: dict):
 
         if not b64 or not mime:
             continue
-
         if mime not in SUPPORTED_MIME_TYPES:
             file_errors.append(f"File '{name}' ({mime}) is unsupported")
             continue
@@ -583,7 +625,6 @@ async def ask_question(request: Request, payload: dict):
                     contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
                 except Exception:
                     file_errors.append(f"Could not process PDF '{name}': {str(e)}")
-
         elif mime == "text/plain":
             try:
                 text_content = raw_bytes.decode("utf-8", errors="replace")
@@ -591,7 +632,6 @@ async def ask_question(request: Request, payload: dict):
                 input_token_estimate += estimate_tokens(text_content)
             except Exception as e:
                 file_errors.append(f"Could not read text file '{name}': {str(e)}")
-
         else:
             try:
                 contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
@@ -605,13 +645,14 @@ async def ask_question(request: Request, payload: dict):
 
     async def stream():
         output_chars = 0
-
         try:
             response_stream = client.models.generate_content_stream(
                 model=model_name,
                 contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                ),
             )
-
             loop = asyncio.get_event_loop()
 
             def get_next():
@@ -686,7 +727,6 @@ async def ask_question(request: Request, payload: dict):
 async def generate_image(request: Request, payload: dict):
 
     check_rate_limit(request, "generate_image")
-
     user_id = extract_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -694,21 +734,20 @@ async def generate_image(request: Request, payload: dict):
     if await is_limit_reached(user_id):
         raise HTTPException(
             status_code=429,
-            detail={
-                "error": "daily_limit_reached",
-                "message": "You've used your daily limit. It resets at midnight UTC.",
-            }
+            detail={"error": "daily_limit_reached", "message": "You've used your daily limit. It resets at midnight UTC."}
         )
 
     raw_prompt   = (payload.get("prompt")      or "").strip()
-    board        = (payload.get("board")       or "ICSE").strip().upper()
+    board        = (payload.get("board")       or "CBSE").strip().upper()
     class_level  = (payload.get("class_level") or "10").strip()
     subject      = (payload.get("subject")     or "General").strip()
+
+    if board == "SSLC":
+        board = "NCERT"
 
     if not raw_prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
-    # ── Prompt engineering — always produce clean, textbook-style diagrams ──
     engineered_prompt = f"""
 Create an accurate educational diagram for {board} Class {class_level} {subject}.
 Topic: {raw_prompt}
@@ -718,7 +757,7 @@ CRITICAL TEXT ACCURACY REQUIREMENTS (most important):
 - Double-check all spelling before rendering — no typos allowed whatsoever
 - Use only standard, correct terminology as taught in {board} Class {class_level} textbooks
 - All mathematical symbols, formulas, and equations must be 100% accurate
-- Labels must use the exact correct English spelling (e.g. "Hypotenuse" not "Hypotunse", "Adjacent" not "Adjecent", "Opposite" not "Oppoite")
+- Labels must use the exact correct English spelling (e.g. "Hypotenuse" not "Hypotunse", "Adjacent" not "Adjecent")
 
 Style requirements:
 - Clean, minimal, flat design — like a professional textbook or Khan Academy illustration
@@ -732,16 +771,12 @@ Style requirements:
 """.strip()
 
     try:
-        # Use gemini-2.5-flash-preview-05-20 for image generation via generate_content
         response = client.models.generate_content(
             model="gemini-3.1-flash-image-preview",
             contents=engineered_prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-            ),
+            config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
         )
 
-        # Extract image bytes from response
         image_bytes = None
         mime_type = "image/png"
         for part in response.candidates[0].content.parts:
@@ -754,14 +789,10 @@ Style requirements:
             raise Exception("No image returned in response")
 
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
-
         if user_id:
             await add_tokens(user_id, 500)
 
-        return {
-            "image": b64_image,
-            "mime_type": mime_type,
-        }
+        return {"image": b64_image, "mime_type": mime_type}
 
     except Exception as e:
         error_msg = str(e)
