@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import json
 import base64
@@ -15,6 +16,14 @@ from fastapi.responses import StreamingResponse
 
 from google import genai
 from google.genai import types
+
+# =====================================================
+# LOGGING HELPER
+# =====================================================
+# Vercel's serverless Python runtime captures stderr more reliably than stdout,
+# and unbuffered writes show up faster. Use this for all RAG-critical logging.
+def rag_log(msg: str):
+    print(msg, file=sys.stderr, flush=True)
 
 # =====================================================
 # ENV CHECK
@@ -38,9 +47,10 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 # =====================================================
 # RAG
 # =====================================================
-EMBED_MODEL    = "text-embedding-004"
-TOP_K_CHUNKS   = 4
-MIN_SIMILARITY = 0.65
+EMBED_MODEL    = "models/gemini-embedding-001"   # MUST match ingest.py
+EMBED_DIMS     = 768                             # MUST match ingest.py
+TOP_K_CHUNKS   = 6                               # more chunks for better grounding
+MIN_SIMILARITY = 0.5                             # gemini-embedding-001 produces lower scores than OpenAI
 
 _gemini_rag_client = None
 
@@ -56,6 +66,7 @@ async def _embed_question(question: str) -> list[float]:
         result = _get_rag_client().models.embed_content(
             model=EMBED_MODEL,
             contents=[question],
+            config={"output_dimensionality": EMBED_DIMS},
         )
         return result.embeddings[0].values
     return await loop.run_in_executor(None, _run)
@@ -68,6 +79,7 @@ async def _retrieve_chunks(embedding, board, class_level, subject) -> list[dict]
         "match_class":     class_level or None,
         "match_subject":   subject or None,
     }
+    rag_log(f"[RAG] POSTing to match_chunks RPC with board={board} class={class_level} subject={subject}")
     async with httpx.AsyncClient(timeout=8) as http:
         resp = await http.post(
             f"{SUPABASE_URL}/rest/v1/rpc/match_chunks",
@@ -75,31 +87,45 @@ async def _retrieve_chunks(embedding, board, class_level, subject) -> list[dict]
             json=payload,
         )
     if resp.status_code != 200:
-        print(f"[RAG] RPC error {resp.status_code}: {resp.text}")
+        rag_log(f"[RAG] RPC error {resp.status_code}: {resp.text[:500]}")
         return []
-    return [c for c in resp.json() if c.get("similarity", 0) >= MIN_SIMILARITY]
+    rows = resp.json()
+    rag_log(f"[RAG] RPC returned {len(rows)} raw chunks; similarities: "
+            f"{[round(r.get('similarity', 0), 2) for r in rows[:5]]}")
+    return [c for c in rows if c.get("similarity", 0) >= MIN_SIMILARITY]
 
 async def build_rag_context(question, board=None, class_level=None, subject=None) -> str:
+    rag_log(f"[RAG] === build_rag_context called ===")
+    rag_log(f"[RAG] question={question[:80]!r}  board={board}  class={class_level}  subject={subject}")
     try:
+        rag_log(f"[RAG] Step 1: embedding question...")
         embedding = await _embed_question(question)
-        chunks    = await _retrieve_chunks(embedding, board, class_level, subject)
+        rag_log(f"[RAG] Step 1 OK: got embedding of dim {len(embedding)}")
+
+        rag_log(f"[RAG] Step 2: calling match_chunks RPC...")
+        chunks = await _retrieve_chunks(embedding, board, class_level, subject)
+        rag_log(f"[RAG] Step 2 OK: got {len(chunks)} chunks after threshold filter")
+
         if not chunks:
+            rag_log(f"[RAG] No chunks above threshold ({MIN_SIMILARITY}) — no context added")
             return ""
-        print(f"[RAG] {len(chunks)} chunks retrieved (top: {chunks[0].get('similarity',0):.2f})")
+        rag_log(f"[RAG] {len(chunks)} chunks passed threshold (top: {chunks[0].get('similarity',0):.2f})")
         lines = ["[TEXTBOOK REFERENCE — use this to ground your answer]"]
         for i, c in enumerate(chunks, 1):
-            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} ---")
+            lines.append(f"\n--- Source {i}: {c.get('board','')} Class {c.get('class_level','')} {c.get('subject','')} {c.get('chapter','')} ---")
             lines.append(c["content"])
         lines.append("\n[END TEXTBOOK REFERENCE]")
         return "\n".join(lines)
     except Exception as e:
-        print(f"[RAG] Error: {e}")
+        import traceback
+        rag_log(f"[RAG] Exception: {type(e).__name__}: {e}")
+        rag_log(f"[RAG] Traceback:\n{traceback.format_exc()}")
         return ""
 
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.8")
+app = FastAPI(title="AI Tutor Backend", version="3.11")
 
 app.add_middleware(
     CORSMiddleware,
@@ -458,7 +484,7 @@ SUBJECT FORMAT: {subject_hint}"""
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.8"}
+    return {"status": "running", "version": "3.11"}
 
 @app.get("/health")
 def health():
@@ -567,6 +593,8 @@ async def ask_question(request: Request, payload: dict):
     model_choice = (payload.get("model")        or "t1").lower()
     files        =  payload.get("files")        or []
 
+    rag_log(f"[ASK] Incoming: board={board} class={class_level} subject={subject} q={question[:80]!r}")
+
     if board == "SSLC":
         board = "NCERT"
 
@@ -589,6 +617,7 @@ async def ask_question(request: Request, payload: dict):
 
     # ── RAG: fetch relevant textbook chunks ──
     rag_context = await build_rag_context(question, board, class_level, subject)
+    rag_log(f"[ASK] RAG context length: {len(rag_context)} chars")
     prompt_text = rag_context + "\n\n" + get_base_prompt(board, class_level, subject, chapter, question, model_choice)
 
     input_token_estimate = estimate_tokens(prompt_text + question)
