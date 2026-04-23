@@ -8,6 +8,7 @@ import hmac
 import hashlib
 from collections import defaultdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +17,9 @@ from fastapi.responses import StreamingResponse
 
 from google import genai
 from google.genai import types
+
+# Web Push
+from pywebpush import webpush, WebPushException
 
 # =====================================================
 # LOGGING HELPER
@@ -43,6 +47,16 @@ if not TURNSTILE_SECRET_KEY:
     raise RuntimeError("TURNSTILE_SECRET_KEY environment variable not set")
 
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+# Web Push env vars — soft-check so local dev doesn't explode if they're missing
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_CLAIM_EMAIL = os.getenv("VAPID_CLAIM_EMAIL", "mailto:support@teengro.in")
+CRON_SECRET = os.getenv("CRON_SECRET")
+
+if not VAPID_PRIVATE_KEY:
+    print("[Startup] WARNING: VAPID_PRIVATE_KEY not set — web push will not work")
+if not CRON_SECRET:
+    print("[Startup] WARNING: CRON_SECRET not set — /api/send-reminders will reject all calls")
 
 # =====================================================
 # RAG
@@ -125,11 +139,11 @@ async def build_rag_context(question, board=None, class_level=None, subject=None
 # =====================================================
 # APP INIT
 # =====================================================
-app = FastAPI(title="AI Tutor Backend", version="3.12")
+app = FastAPI(title="AI Tutor Backend", version="3.13")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://teengro.in", "https://teengro.vercel.app", "http://localhost", "http://localhost:3000", "http://127.0.0.1"],
+    allow_origins=["https://teengro.in", "https://www.teengro.in", "https://teengro.vercel.app", "http://localhost", "http://localhost:3000", "http://127.0.0.1"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -512,7 +526,7 @@ SUBJECT FORMAT: {subject_hint}"""
 # =====================================================
 @app.get("/")
 def root():
-    return {"status": "running", "version": "3.12"}
+    return {"status": "running", "version": "3.13"}
 
 @app.get("/health")
 def health():
@@ -565,6 +579,231 @@ async def signup(request: Request, payload: dict):
 async def reset_password(request: Request, payload: dict):
     check_rate_limit(request, "reset_password")
     return {"message": "Reset password route reached"}
+
+# =====================================================
+# WEB PUSH: SAVE / DELETE SUBSCRIPTION
+# =====================================================
+@app.post("/api/save-push-subscription")
+async def save_push_subscription(request: Request, payload: dict):
+    user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    sub = payload.get("subscription")
+    if not sub or not isinstance(sub, dict):
+        raise HTTPException(status_code=400, detail="Missing subscription")
+    if not sub.get("endpoint") or not sub.get("keys"):
+        raise HTTPException(status_code=400, detail="Invalid subscription payload")
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as http:
+            await http.patch(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=_supabase_headers(),
+                params={"id": f"eq.{user_id}"},
+                json={
+                    "push_subscription": sub,
+                    "push_last_error": None,
+                    "push_fail_count": 0,
+                },
+            )
+        return {"ok": True}
+    except Exception as e:
+        print(f"[Push] Save subscription failed for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not save subscription")
+
+
+@app.post("/api/delete-push-subscription")
+async def delete_push_subscription(request: Request):
+    user_id = extract_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as http:
+            await http.patch(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=_supabase_headers(),
+                params={"id": f"eq.{user_id}"},
+                json={"push_subscription": None},
+            )
+        return {"ok": True}
+    except Exception as e:
+        print(f"[Push] Delete subscription failed for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not delete subscription")
+
+
+# =====================================================
+# WEB PUSH: CRON ENDPOINT (sends reminders to users due right now)
+# =====================================================
+@app.post("/api/send-reminders")
+async def send_reminders(request: Request):
+    """
+    Vercel Cron (or cron-job.org) hits this every minute.
+    Finds users whose reminder_time matches the current IST minute and who
+    haven't been reminded today, then sends them a Web Push notification.
+    """
+    if not CRON_SECRET:
+        raise HTTPException(status_code=500, detail="CRON_SECRET not configured")
+
+    # Two acceptable auth modes:
+    #   1. Authorization: Bearer <CRON_SECRET>     (cron-job.org, custom crons)
+    #   2. Vercel Cron sends the same header automatically if you set CRON_SECRET
+    auth = request.headers.get("authorization", "")
+    if auth != f"Bearer {CRON_SECRET}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not VAPID_PRIVATE_KEY:
+        raise HTTPException(status_code=500, detail="VAPID_PRIVATE_KEY not configured")
+
+    ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    current_hhmm = now_ist.strftime("%H:%M")
+    current_hhmm_sec = now_ist.strftime("%H:%M:00")
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    # Fetch candidates: reminder_enabled = true AND push_subscription IS NOT NULL
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=_supabase_headers(),
+                params={
+                    "select": "id,full_name,streak,last_active_date,reminder_time,reminder_last_fired_date,push_subscription,push_fail_count",
+                    "reminder_enabled": "eq.true",
+                    "push_subscription": "not.is.null",
+                },
+            )
+        if resp.status_code != 200:
+            rag_log(f"[Push] Candidate fetch failed: {resp.status_code} {resp.text[:200]}")
+            raise HTTPException(status_code=500, detail="Candidate fetch failed")
+        candidates = resp.json() or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        rag_log(f"[Push] Candidate fetch exception: {e}")
+        raise HTTPException(status_code=500, detail="Candidate fetch exception")
+
+    due_users = []
+    for row in candidates:
+        rtime = (row.get("reminder_time") or "").strip()
+        # Accept both "18:00" and "18:00:00"
+        if rtime not in (current_hhmm, current_hhmm_sec):
+            continue
+        if row.get("reminder_last_fired_date") == today_str:
+            continue
+        last_active = row.get("last_active_date")
+        if last_active:
+            last_active_str = str(last_active).split("T")[0]
+            if last_active_str == today_str:
+                # User already studied today — skip
+                continue
+        due_users.append(row)
+
+    rag_log(f"[Push] Cron tick: {current_hhmm} IST — checked={len(candidates)} due={len(due_users)}")
+
+    sent = 0
+    failed = 0
+    cleaned = 0
+
+    for user in due_users:
+        sub = user["push_subscription"]
+        streak = user.get("streak") or 0
+
+        # Streak-aware copy
+        if streak >= 3:
+            title = f"Don't break your {streak}-day streak! 🔥"
+            body_text = "Open Teengro now to keep it alive."
+        elif streak >= 1:
+            title = "Keep your streak alive 🔥"
+            body_text = f"You're on day {streak}. Don't stop now."
+        elif now_ist.hour < 12:
+            title = "Morning, time to learn"
+            body_text = "A few minutes of study goes a long way. Open Teengro →"
+        else:
+            title = "Time to study"
+            body_text = "Your daily Teengro session is ready."
+
+        push_payload = json.dumps({
+            "title": title,
+            "body": body_text,
+            "url": "/dashboard.html",
+            "tag": "teengro-daily-reminder",
+        })
+
+        try:
+            webpush(
+                subscription_info=sub,
+                data=push_payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_CLAIM_EMAIL},
+                ttl=3600,
+            )
+            sent += 1
+
+            # Mark fired so duplicate cron ticks don't re-send
+            try:
+                async with httpx.AsyncClient(timeout=5) as http:
+                    await http.patch(
+                        f"{SUPABASE_URL}/rest/v1/user_profiles",
+                        headers=_supabase_headers(),
+                        params={"id": f"eq.{user['id']}"},
+                        json={"reminder_last_fired_date": today_str},
+                    )
+            except Exception as e:
+                rag_log(f"[Push] Mark-fired failed for {user['id']}: {e}")
+
+        except WebPushException as e:
+            failed += 1
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+
+            # 404/410 = subscription is dead, clean it up
+            if status_code in (404, 410):
+                cleaned += 1
+                try:
+                    async with httpx.AsyncClient(timeout=5) as http:
+                        await http.patch(
+                            f"{SUPABASE_URL}/rest/v1/user_profiles",
+                            headers=_supabase_headers(),
+                            params={"id": f"eq.{user['id']}"},
+                            json={
+                                "push_subscription": None,
+                                "push_last_error": f"Gone ({status_code})",
+                            },
+                        )
+                except Exception:
+                    pass
+                rag_log(f"[Push] Cleaned dead sub for {user['id']} (HTTP {status_code})")
+            else:
+                new_fail_count = (user.get("push_fail_count") or 0) + 1
+                try:
+                    async with httpx.AsyncClient(timeout=5) as http:
+                        await http.patch(
+                            f"{SUPABASE_URL}/rest/v1/user_profiles",
+                            headers=_supabase_headers(),
+                            params={"id": f"eq.{user['id']}"},
+                            json={
+                                "push_last_error": str(e)[:500],
+                                "push_fail_count": new_fail_count,
+                            },
+                        )
+                except Exception:
+                    pass
+                rag_log(f"[Push] Failed for {user['id']} (HTTP {status_code}): {str(e)[:200]}")
+        except Exception as e:
+            failed += 1
+            rag_log(f"[Push] Unexpected error for {user['id']}: {e}")
+
+    return {
+        "ok": True,
+        "checked": len(candidates),
+        "due": len(due_users),
+        "sent": sent,
+        "failed": failed,
+        "cleaned": cleaned,
+        "time_ist": current_hhmm,
+    }
+
 
 # =====================================================
 # FILE UPLOAD HELPER
